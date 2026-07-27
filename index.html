@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>FileSpace</title>
+  <link rel="stylesheet" href="/src/style.css" />
+</head>
+<body>
+  <div id="app">
+    <!-- 标题栏：标签页 + 窗口控制 -->
+    <div class="titlebar">
+      <div class="tabstrip" id="tabstrip"></div>
+      <button class="tab-add" id="tab-add" title="新建标签页"><span class="fluent">&#xE710;</span></button>
+      <div class="titlebar-drag" data-tauri-drag-region></div>
+      <div class="win-controls">
+        <button class="win-btn" id="win-min"><span class="fluent">&#xE921;</span></button>
+        <button class="win-btn" id="win-max"><span class="fluent" id="win-max-glyph">&#xE922;</span></button>
+        <button class="win-btn win-close" id="win-close"><span class="fluent">&#xE8BB;</span></button>
+      </div>
+    </div>
+
+    <!-- 导航栏：前进后退 + 面包屑 + 搜索 -->
+    <div class="navbar">
+      <button class="nav-btn" id="nav-back" title="后退" disabled><span class="fluent">&#xE72B;</span></button>
+      <button class="nav-btn" id="nav-fwd" title="前进" disabled><span class="fluent">&#xE72A;</span></button>
+      <button class="nav-btn" id="nav-up" title="上移"><span class="fluent">&#xE74A;</span></button>
+      <button class="nav-btn" id="nav-refresh" title="刷新"><span class="fluent">&#xE72C;</span></button>
+      <div class="breadcrumb-box" id="breadcrumb-box">
+        <div class="breadcrumb" id="breadcrumb"></div>
+      </div>
+      <div class="search-box">
+        <input id="search-input" type="text" placeholder="搜索" spellcheck="false" autocomplete="off" />
+        <span class="fluent search-glyph">&#xE721;</span>
+      </div>
+    </div>
+
+    <!-- 命令栏 -->
+    <div class="cmdbar">
+      <button class="cmd-btn cmd-new" id="cmd-new">
+        <span class="fluent accent">&#xE710;</span><span class="cmd-label">新建</span><span class="fluent chev">&#xE70D;</span>
+      </button>
+      <div class="cmd-sep"></div>
+      <button class="cmd-btn icon-only" id="cmd-cut" title="剪切"><span class="fluent">&#xE8C6;</span></button>
+      <button class="cmd-btn icon-only" id="cmd-copy" title="复制"><span class="fluent">&#xE8C8;</span></button>
+      <button class="cmd-btn icon-only" id="cmd-paste" title="粘贴"><span class="fluent">&#xE77F;</span></button>
+      <button class="cmd-btn icon-only" id="cmd-rename" title="重命名"><span class="fluent">&#xE8AC;</span></button>
+      <button class="cmd-btn icon-only" id="cmd-share" title="共享"><span class="fluent">&#xE72D;</span></button>
+      <button class="cmd-btn icon-only" id="cmd-delete" title="删除"><span class="fluent">&#xE74D;</span></button>
+      <div class="cmd-sep"></div>
+      <button class="cmd-btn" id="cmd-sort"><span class="fluent">&#xE8CB;</span><span class="cmd-label">排序</span><span class="fluent chev">&#xE70D;</span></button>
+      <button class="cmd-btn" id="cmd-view"><span class="fluent">&#xE890;</span><span class="cmd-label">查看</span><span class="fluent chev">&#xE70D;</span></button>
+      <button class="cmd-btn icon-only" id="cmd-more" title="查看更多"><span class="fluent">&#xE712;</span></button>
+      <div class="cmd-spacer"></div>
+      <button class="cmd-btn" id="cmd-details"><span class="fluent">&#xE8A0;</span><span class="cmd-label">详细信息</span></button>
+    </div>
+
+    <!-- 主体：侧栏 + 文件列表 -->
+    <div class="body">
+      <div class="sidebar" id="sidebar"></div>
+      <div class="sidebar-resizer"></div>
+      <div class="main">
+        <div class="list-header" id="list-header"></div>
+        <div class="list-body" id="list-body"></div>
+      </div>
+      <div class="pane-resizer" id="pane-resizer" style="display:none"></div>
+      <div class="side-pane" id="side-pane" style="display:none"></div>
+    </div>
+
+    <!-- 状态栏 -->
+    <div class="statusbar">
+      <span id="status-count"></span>
+      <span class="status-sep" id="status-sel-wrap" style="display:none">|</span>
+      <span id="status-sel"></span>
+      <div class="status-spacer"></div>
+      <button class="status-btn active" title="详细信息视图"><span class="fluent">&#xE8FD;</span></button>
+      <button class="status-btn" title="大缩略图视图"><span class="fluent">&#xE8A9;</span></button>
+    </div>
+  </div>
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>
