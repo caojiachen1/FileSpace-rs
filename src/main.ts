@@ -1,6 +1,7 @@
 // FileSpace 前端：Win11 资源管理器 UI
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { PhysicalPosition } from "@tauri-apps/api/dpi";
 import { listen } from "@tauri-apps/api/event";
 
 /* ===================== 类型 ===================== */
@@ -2049,10 +2050,58 @@ function bindEvents() {
   $("win-min").onclick = () => void appWindow.minimize();
   $("win-max").onclick = () => void appWindow.toggleMaximize();
   $("win-close").onclick = () => void appWindow.close();
-  void appWindow.onResized(async () => {
+  // 最大化时禁用边缘 resize 判定：避免顶部显示拖拽光标，且屏幕最右上角能直接命中关闭按钮
+  const syncMaximized = async () => {
     const m = await appWindow.isMaximized();
     $("win-max-glyph").innerHTML = m ? "&#xE923;" : "&#xE922;";
+    await appWindow.setResizable(!m);
+  };
+  void appWindow.onResized(() => void syncMaximized());
+  void syncMaximized();
+
+  // 自定义标题栏拖拽：最大化时真正拖动（超过阈值）才还原为窗口并跟随鼠标；
+  // 单击不触发还原，双击切换最大化（Windows 原生行为）
+  const dragEl = $("titlebar-drag");
+  dragEl.addEventListener("mousedown", async (ev) => {
+    if (ev.button !== 0 || ev.detail >= 2) return; // 双击交给 dblclick 处理
+    ev.preventDefault();
+    if (!(await appWindow.isMaximized())) {
+      await appWindow.startDragging();
+      return;
+    }
+    // 最大化：监听移动，超过 4px 才还原并开始拖拽
+    const sx = ev.clientX;
+    const sy = ev.clientY;
+    let started = false;
+    const cleanup = () => {
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+    };
+    const onUp = () => cleanup();
+    const onMove = async (e: MouseEvent) => {
+      if (started) return;
+      if (Math.abs(e.clientX - sx) < 4 && Math.abs(e.clientY - sy) < 4) return;
+      started = true;
+      cleanup();
+      // 记录鼠标物理坐标与在标题栏中的比例位置
+      const scale = await appWindow.scaleFactor();
+      const pos = await appWindow.outerPosition();
+      const cursorX = pos.x + e.clientX * scale;
+      const cursorY = pos.y + e.clientY * scale;
+      const ratioX = e.clientX / window.innerWidth;
+      await appWindow.unmaximize();
+      // 还原后按比例把窗口放到鼠标下方，再开始系统拖拽
+      const size = await appWindow.outerSize();
+      await appWindow.setPosition(new PhysicalPosition(
+        Math.round(cursorX - size.width * ratioX),
+        Math.round(cursorY - sy * scale),
+      ));
+      await appWindow.startDragging();
+    };
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
   });
+  dragEl.addEventListener("dblclick", () => void appWindow.toggleMaximize());
 
   $("nav-back").onclick = goBack;
   $("nav-fwd").onclick = goForward;
