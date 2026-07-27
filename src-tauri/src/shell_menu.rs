@@ -49,17 +49,20 @@ impl Drop for PidlGuard {
     }
 }
 
-fn context_menu_for_items(paths: &[String]) -> windows::core::Result<IContextMenu> {
+/// 由解析路径集合构建 IShellItemArray（右键菜单/现代命令共用）
+pub(crate) fn selection_array(paths: &[String]) -> windows::core::Result<IShellItemArray> {
     let mut pidls = Vec::new();
     for p in paths {
         pidls.push(parse_to_pidl(p)?);
     }
     let guard = PidlGuard(pidls);
     let const_pidls: Vec<*const ITEMIDLIST> = guard.0.iter().map(|p| *p as *const _).collect();
-    unsafe {
-        let array: IShellItemArray = SHCreateShellItemArrayFromIDLists(&const_pidls)?;
-        array.BindToHandler(None, &windows::Win32::UI::Shell::BHID_SFUIObject)
-    }
+    unsafe { SHCreateShellItemArrayFromIDLists(&const_pidls) }
+}
+
+fn context_menu_for_items(paths: &[String]) -> windows::core::Result<IContextMenu> {
+    let array = selection_array(paths)?;
+    unsafe { array.BindToHandler(None, &windows::Win32::UI::Shell::BHID_SFUIObject) }
 }
 
 fn context_menu_for_background(folder_path: &str) -> windows::core::Result<IContextMenu> {
@@ -588,4 +591,170 @@ pub fn invoke_new(id: u32) -> bool {
         let _ = DestroyMenu(hmenu);
         ok
     }
+}
+
+/* ===================== Fluent 右键菜单数据源（前端 HTML 渲染） ===================== */
+
+thread_local! {
+    // 挂起的经典菜单实例：前端展示后，用户选择时在同一 IContextMenu 上 InvokeCommand
+    static PENDING_CTX: RefCell<Option<(IContextMenu, HMENU, Vec<String>)>> = const { RefCell::new(None) };
+}
+
+#[derive(Serialize)]
+pub struct CtxNode {
+    pub id: u32,
+    pub label: String,
+    pub accel: String,
+    pub verb: String,
+    pub icon: Option<String>,
+    pub separator: bool,
+    pub children: Vec<CtxNode>,
+}
+
+fn clear_pending_ctx() {
+    PENDING_CTX.with(|p| {
+        if let Some((_, hmenu, _)) = p.borrow_mut().take() {
+            unsafe { let _ = DestroyMenu(hmenu); }
+        }
+    });
+}
+
+/// 递归枚举菜单树（子菜单先转发 WM_INITMENUPOPUP 触发延迟填充）
+unsafe fn enum_menu_tree(menu_obj: &IContextMenu, hmenu: HMENU, depth: u32) -> Vec<CtxNode> {
+    use windows::Win32::UI::WindowsAndMessaging::SendMessageW;
+    let n = GetMenuItemCount(Some(hmenu)).max(0) as u32;
+    let mut out: Vec<CtxNode> = Vec::new();
+    for i in 0..n {
+        let hsub = GetSubMenu(hmenu, i as i32);
+        let id = GetMenuItemID(hmenu, i as i32);
+        let raw = menu_item_text(hmenu, i);
+        if hsub.0.is_null() && (id == 0 || id == u32::MAX) {
+            // 分隔线（去重：不连续、不开头）
+            if !out.is_empty() && !out.last().map(|e| e.separator).unwrap_or(false) {
+                out.push(CtxNode {
+                    id: 0, label: String::new(), accel: String::new(), verb: String::new(),
+                    icon: None, separator: true, children: Vec::new(),
+                });
+            }
+            continue;
+        }
+        if raw.is_empty() {
+            continue;
+        }
+        let (label, accel) = match raw.split_once('\t') {
+            Some((l, a)) => (l.to_string(), a.to_string()),
+            None => (raw, String::new()),
+        };
+        let mut children = Vec::new();
+        if !hsub.0.is_null() && depth < 3 {
+            // 性能：先直接枚举，仅当子菜单为空（延迟填充型）才转发 WM_INITMENUPOPUP
+            children = enum_menu_tree(menu_obj, hsub, depth + 1);
+            if children.is_empty() {
+                let _ = SendMessageW(
+                    helper_hwnd(),
+                    WM_INITMENUPOPUP,
+                    Some(windows::Win32::Foundation::WPARAM(hsub.0 as usize)),
+                    Some(windows::Win32::Foundation::LPARAM(i as isize)),
+                );
+                children = enum_menu_tree(menu_obj, hsub, depth + 1);
+            }
+        }
+        let verb = if (ID_FIRST..=ID_LAST).contains(&id) {
+            get_verb(menu_obj, id - ID_FIRST)
+        } else {
+            String::new()
+        };
+        out.push(CtxNode {
+            id,
+            label,
+            accel,
+            verb,
+            icon: menu_item_icon(hmenu, i),
+            separator: false,
+            children,
+        });
+    }
+    while out.last().map(|e| e.separator).unwrap_or(false) {
+        out.pop();
+    }
+    out
+}
+
+/// 获取选中项的完整经典菜单树（含第三方扩展/子菜单/图标），供前端 Fluent 风格渲染
+pub fn get_ctx_menu(selection: Vec<String>) -> Vec<CtxNode> {
+    clear_pending_ctx();
+    let menu_obj = match context_menu_for_items(&selection) {
+        Ok(m) => m,
+        Err(_) => return Vec::new(),
+    };
+    unsafe {
+        let hmenu = match CreatePopupMenu() {
+            Ok(h) => h,
+            Err(_) => return Vec::new(),
+        };
+        if menu_obj
+            .QueryContextMenu(hmenu, 0, ID_FIRST, ID_LAST, CMF_NORMAL | CMF_EXPLORE | CMF_CANRENAME)
+            .is_err()
+        {
+            let _ = DestroyMenu(hmenu);
+            return Vec::new();
+        }
+        use crate::shell_thread::{ACTIVE_MENU2, ACTIVE_MENU3};
+        ACTIVE_MENU2.with(|m| *m.borrow_mut() = menu_obj.cast::<IContextMenu2>().ok());
+        ACTIVE_MENU3.with(|m| *m.borrow_mut() = menu_obj.cast::<IContextMenu3>().ok());
+        let tree = enum_menu_tree(&menu_obj, hmenu, 0);
+        ACTIVE_MENU2.with(|m| *m.borrow_mut() = None);
+        ACTIVE_MENU3.with(|m| *m.borrow_mut() = None);
+        PENDING_CTX.with(|p| *p.borrow_mut() = Some((menu_obj, hmenu, selection)));
+        tree
+    }
+}
+
+/// 执行菜单项；rename/文件夹 open 交给前端处理（与原生弹菜单路径同逻辑）
+pub fn invoke_ctx(id: u32) -> MenuResult {
+    let none = MenuResult { action: "none".into(), verb: String::new() };
+    let Some((menu_obj, hmenu, selection)) = PENDING_CTX.with(|p| p.borrow_mut().take()) else {
+        return none;
+    };
+    unsafe {
+        let offset = id - ID_FIRST;
+        let verb = get_verb(&menu_obj, offset);
+        if verb == "rename" {
+            let _ = DestroyMenu(hmenu);
+            return MenuResult { action: "rename".into(), verb };
+        }
+        if verb == "open" && selection.len() == 1 {
+            if let Ok(item) = item_from_path(&selection[0]) {
+                use windows::Win32::System::SystemServices::{SFGAO_FOLDER, SFGAO_STREAM};
+                if let Ok(attrs) = item.GetAttributes(SFGAO_FOLDER | SFGAO_STREAM) {
+                    if (attrs.0 & SFGAO_FOLDER.0) != 0 && (attrs.0 & SFGAO_STREAM.0) == 0 {
+                        let _ = DestroyMenu(hmenu);
+                        return MenuResult { action: "navigate".into(), verb };
+                    }
+                }
+            }
+        }
+        let mut info = CMINVOKECOMMANDINFOEX {
+            cbSize: std::mem::size_of::<CMINVOKECOMMANDINFOEX>() as u32,
+            fMask: CMIC_MASK_UNICODE,
+            hwnd: helper_hwnd(),
+            lpVerb: windows::core::PCSTR(offset as usize as *const u8),
+            lpVerbW: PCWSTR(offset as usize as *const u16),
+            nShow: SW_SHOWNORMAL.0,
+            ..Default::default()
+        };
+        let ok = menu_obj
+            .InvokeCommand(&mut info as *mut _ as *mut CMINVOKECOMMANDINFO)
+            .is_ok();
+        let _ = DestroyMenu(hmenu);
+        MenuResult {
+            action: if ok { "invoked".into() } else { "none".into() },
+            verb,
+        }
+    }
+}
+
+/// 前端菜单关闭未选择时释放挂起实例
+pub fn close_ctx() {
+    clear_pending_ctx();
 }

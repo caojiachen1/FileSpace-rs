@@ -514,14 +514,21 @@ function renderBreadcrumb() {
     } catch { /* 该段不可枚举 */ }
   };
 
-  // 最前：当前位置图标 + 桌面根下拉（主文件夹/OneDrive/此电脑/桌面目录等）
+  // 最前：路径根节点图标（磁盘路径下即"此电脑"显示器图标，与资源管理器一致）+ 桌面根下拉
+  const rootCrumb = listing.breadcrumb[0];
   const locIcon = document.createElement("img");
   locIcon.className = "crumb-loc-icon";
-  locIcon.src = getIcon(listing.parse_path, 32) || folderSvg();
+  locIcon.src = (rootCrumb && getIcon(rootCrumb.parse_path, 32)) || getIcon(listing.parse_path, 32) || folderSvg();
+  if (rootCrumb && !getIcon(rootCrumb.parse_path, 32)) {
+    void loadIcons(
+      [{ parse_path: rootCrumb.parse_path, sort_as_folder: true, ext: "" } as ShellEntry],
+      () => new Map([[rootCrumb.parse_path, locIcon]]),
+    );
+  }
   bc.append(locIcon);
   const rootChev = document.createElement("span");
   rootChev.className = "fluent crumb-chev";
-  rootChev.innerHTML = "&#xE70D;";
+  rootChev.innerHTML = "&#xE76C;";
   rootChev.onclick = async (ev) => {
     ev.stopPropagation();
     if (suppressAnchor === rootChev) { suppressAnchor = null; return; }
@@ -883,7 +890,7 @@ function bindItemEvents(el: HTMLElement, e: ShellEntry, idx: number, tab: Tab) {
       renderList();
       renderStatus();
     }
-    void showItemMenu();
+    void showItemMenu(ev.clientX, ev.clientY);
   };
 }
 
@@ -1089,7 +1096,8 @@ function renderCardGrid(body: HTMLElement, tab: Tab, entries: ShellEntry[]) {
 }
 
 /* -------- 此电脑：设备和驱动器 / 网络位置（带容量条） -------- */
-const pcGroupCollapsed: Record<string, boolean> = {};
+// 网络位置默认折叠（与资源管理器一致）
+const pcGroupCollapsed: Record<string, boolean> = { "网络位置": true };
 
 function renderThisPc(body: HTMLElement, tab: Tab, entries: ShellEntry[]) {
   const isDrive = (e: ShellEntry) => {
@@ -1390,6 +1398,7 @@ interface MenuItem {
   label?: string;
   glyph?: string;      // Segoe Fluent 图标
   iconImg?: string;    // 位图图标（data URL，如 ShellNew 菜单）
+  accel?: string;      // 右侧快捷键文本（如 "Ctrl+Shift+C"）
   checked?: boolean;   // 选中标记
   checkStyle?: "dot" | "check"; // 圆点（单选）/ 对勾（开关）
   separator?: boolean;
@@ -1401,6 +1410,8 @@ interface MenuItem {
 
 let dropdownAnchor: HTMLElement | null = null;
 let suppressAnchor: HTMLElement | null = null;
+// Fluent 右键菜单是否挂起着后端菜单实例
+let ctxMenuOpen = false;
 
 // 资源管理器式滑出动画：菜单整体从按钮下方滑下来，收起时整体滑回去
 // 实现：外层 .dropdown-wrap 做裁剪，内层菜单 translateY(-100% -> 0)
@@ -1442,6 +1453,12 @@ function closeDropdown() {
   document.querySelectorAll<HTMLElement>(".dropdown-wrap").forEach(slideOut);
   dropdownAnchor = null;
   document.removeEventListener("mousedown", onDocDown, true);
+  ctxUiOpen = false;
+  // Fluent 右键菜单未选择即关闭：释放后端挂起的菜单实例
+  if (ctxMenuOpen) {
+    ctxMenuOpen = false;
+    void invoke("close_ctx_menu");
+  }
 }
 function onDocDown(ev: MouseEvent) {
   const t = ev.target as HTMLElement;
@@ -1494,6 +1511,12 @@ function buildMenu(items: MenuItem[]): HTMLElement {
     label.textContent = it.label ?? "";
     if (hasGlyphColumn) el.append(glyph);
     el.append(label);
+    if (it.accel) {
+      const ac = document.createElement("span");
+      ac.className = "dd-accel";
+      ac.textContent = it.accel;
+      el.append(ac);
+    }
     if (it.submenu) {
       const arrow = document.createElement("span");
       arrow.className = "fluent dd-arrow";
@@ -1503,12 +1526,15 @@ function buildMenu(items: MenuItem[]): HTMLElement {
       const openSub = () => {
         if (sub) return;
         sub = wrapMenu(buildMenu(it.submenu!));
+        const subInner = sub.firstElementChild as HTMLElement;
+        // 悬停子菜单（如"显示更多选项"）：尽量用满视口高度，一屏展示更多内容
+        subInner.classList.add("submenu-tall");
         document.body.append(sub);
         const inner = sub.firstElementChild as HTMLElement;
         const r = el.getBoundingClientRect();
         const w = inner.offsetWidth;
         const x = r.right + w > window.innerWidth ? r.left - w : r.right;
-        const y = Math.min(r.top, window.innerHeight - inner.offsetHeight - 8);
+        const y = Math.max(8, Math.min(r.top, window.innerHeight - inner.offsetHeight - 8));
         // 补偿容器左侧 24px 阴影留白
         sub.style.left = `${x - 24}px`;
         sub.style.top = `${y}px`;
@@ -1529,8 +1555,9 @@ function buildMenu(items: MenuItem[]): HTMLElement {
       };
       el.onclick = () => {
         if (it.disabled) return;
-        closeDropdown();
+        // 先执行动作再关菜单：避免 closeDropdown 的后端释放与菜单项 invoke 产生竞态
         it.onClick?.();
+        closeDropdown();
       };
     }
     menu.append(el);
@@ -1867,6 +1894,100 @@ function startAddressEdit() {
 }
 
 /* ===================== 交互动作 ===================== */
+// Fluent 右键菜单（选中项）：后端经典菜单树 + 前端 Win11 风格渲染
+interface CtxNode {
+  id: number;
+  label: string;
+  accel: string;
+  verb: string;
+  icon: string | null;
+  separator: boolean;
+  children: CtxNode[];
+}
+
+// Win11 现代注册扩展（IExplorerCommand）
+interface ModernNode {
+  mid: number;
+  label: string;
+  icon: string | null;
+  children: ModernNode[];
+}
+
+// 已在快捷条/标准段呈现的经典 verb，扩展段不重复显示
+const STD_CTX_VERBS = new Set([
+  "open", "openas", "opennewwindow", "opennewtab", "opennewprocess", "explore", "find",
+  "cut", "copy", "paste", "delete", "rename", "properties", "link",
+  "pintohome", "pintostartscreen", "runas", "edit", "print", "share",
+]);
+
+// Win11 现代菜单会直接展示的已注册扩展（IExplorerCommand 类）；
+// 经典枚举无法区分注册方式，按已知现代扩展名称白名单过滤，其余全部收进"显示更多选项"
+const MODERN_EXT_PATTERNS = [
+  /nanazip/i,
+  /onedrive/i,
+  /file locksmith/i,
+  /powerrename/i,
+  /\bcode\b/i,
+  /\bzed\b/i,
+  /终端|terminal/i,
+  /压缩到|compress/i,
+];
+const isModernExt = (label: string) => MODERN_EXT_PATTERNS.some((re) => re.test(label));
+
+let ctxToken = 0;
+let ctxUiOpen = false;
+
+// 复制所选项的文件地址到剪贴板
+function copyAddresses() {
+  const tab = activeTab();
+  const paths = [...tab.selection].map(
+    (p) => tab.listing?.entries.find((e) => e.parse_path === p)?.fs_path ?? p,
+  );
+  if (paths.length) void navigator.clipboard.writeText(paths.join("\n"));
+}
+
+// 顶部快捷条：剪切/复制/重命名/删除（与原版一致）
+function buildCtxQuickbar(sel: string[]): HTMLElement {
+  const bar = document.createElement("div");
+  bar.className = "ctx-quickbar";
+  const virt = isVirtualLocation();
+  const btn = (glyph: string, label: string, onClick: () => void, disabled: boolean) => {
+    const b = document.createElement("button");
+    b.className = "ctx-qbtn";
+    b.disabled = disabled;
+    b.innerHTML = `<span class="fluent">${glyph}</span><span>${label}</span>`;
+    b.onclick = () => { onClick(); closeDropdown(); };
+    bar.append(b);
+  };
+  btn("&#xE8C6;", "剪切", () => void runVerb("cut"), virt);
+  btn("&#xE8C8;", "复制", () => void runVerb("copy"), virt);
+  btn("&#xE8AC;", "重命名", () => startRename(), virt || sel.length !== 1);
+  btn("&#xE74D;", "删除", () => void runVerb("delete"), virt);
+  return bar;
+}
+
+// 在鼠标坐标附近弹出带快捷条的 Fluent 右键菜单；一级菜单不滚动，
+// 放不下时整体上移完整显示（位置可脱离鼠标）
+function showCtxMenuAt(x: number, y: number, items: MenuItem[], sel: string[]) {
+  closeDropdown();
+  const menu = wrapMenu(buildMenu(items));
+  const inner = menu.firstElementChild as HTMLElement;
+  inner.classList.add("ctx-menu");
+  inner.prepend(buildCtxQuickbar(sel));
+  document.body.append(menu);
+  // 极端情况（菜单比视口还高）才回退到内部滚动
+  if (inner.offsetHeight > window.innerHeight - 16) {
+    inner.style.maxHeight = `${window.innerHeight - 16}px`;
+    inner.style.overflowY = "auto";
+  }
+  const px = Math.min(x, window.innerWidth - inner.offsetWidth - 8);
+  const py = Math.max(8, Math.min(y, window.innerHeight - inner.offsetHeight - 8));
+  menu.style.left = `${px - 24}px`;
+  menu.style.top = `${py}px`;
+  slideIn(menu);
+  setTimeout(() => document.addEventListener("mousedown", onDocDown, true), 0);
+}
+
 async function openEntry(e: ShellEntry) {
   if (e.is_folder) {
     void navigate(e.parse_path);
@@ -1875,12 +1996,117 @@ async function openEntry(e: ShellEntry) {
   }
 }
 
-async function showItemMenu() {
+async function showItemMenu(x: number, y: number) {
   const tab = activeTab();
   const sel = [...tab.selection];
   if (sel.length === 0) return;
-  const r = await invoke<MenuResult>("show_context_menu", { selection: sel, background: null, state: null });
-  handleMenuResult(r, sel);
+  const entry = sel.length === 1 ? tab.listing?.entries.find((e) => e.parse_path === sel[0]) : undefined;
+  const token = ++ctxToken;
+
+  const stdItems = (extra: MenuItem[], mid: MenuItem[] = []): MenuItem[] => {
+    const items: MenuItem[] = [];
+    if (entry) {
+      items.push({ label: "打开", glyph: "&#xE8E5;", accel: "Enter", onClick: () => void openEntry(entry) });
+      if (entry.is_folder) {
+        items.push({ label: "在新标签页中打开", glyph: "&#xE8AD;", onClick: () => addTab(entry.parse_path) });
+        items.push({
+          label: "固定到快速访问", glyph: "&#xE718;",
+          onClick: () => {
+            void invoke("invoke_verb", { selection: sel, background: null, verb: "pintohome" }).then(() => void loadSidebar());
+          },
+        });
+      }
+    }
+    items.push(...mid);
+    items.push({ label: "复制文件地址", glyph: "&#xE8C8;", accel: "Ctrl+Shift+C", onClick: copyAddresses });
+    items.push({ label: "属性", glyph: "&#xE90F;", accel: "Alt+Enter", onClick: showProperties });
+    items.push(...extra);
+    return items;
+  };
+
+  // 加载完成后一次性显示菜单（经典树 + 现代扩展并行获取，后端已做实例/图标缓存）
+  let tree: CtxNode[] = [];
+  let modern: ModernNode[] = [];
+  try {
+    [tree, modern] = await Promise.all([
+      invoke<CtxNode[]>("get_ctx_menu", { selection: sel }).catch(() => [] as CtxNode[]),
+      invoke<ModernNode[]>("get_modern_menu", { selection: sel }).catch(() => [] as ModernNode[]),
+    ]);
+  } catch (e) { console.error(e); }
+  // 期间又发起了新菜单：释放后端实例
+  if (token !== ctxToken) {
+    if (tree.length) void invoke("close_ctx_menu");
+    return;
+  }
+
+  const nodeToItem = (n: CtxNode): MenuItem => {
+    if (n.separator) return { separator: true };
+    const clickable = n.children.length === 0 && n.id >= 1 && n.id <= 0x7fff;
+    return {
+      label: n.label,
+      accel: n.accel || undefined,
+      iconImg: n.icon ?? undefined,
+      submenu: n.children.length ? n.children.map(nodeToItem) : undefined,
+      disabled: !clickable && n.children.length === 0,
+      onClick: clickable
+        ? () => {
+            ctxMenuOpen = false;
+            void invoke<MenuResult>("invoke_ctx_item", { id: n.id }).then((r) => handleMenuResult(r, sel));
+          }
+        : undefined,
+    };
+  };
+
+  // 扩展段：优先用真实现代注册扩展（IExplorerCommand 枚举，与资源管理器一级菜单同源）；
+  // 枚举不可用时回退到名称白名单过滤经典树
+  const modernToItem = (n: ModernNode): MenuItem => ({
+    label: n.label,
+    iconImg: n.icon ?? undefined,
+    submenu: n.children.length ? n.children.map(modernToItem) : undefined,
+    onClick: n.children.length ? undefined : () => {
+      ctxMenuOpen = false;
+      void invoke("invoke_modern_item", { mid: n.mid }).then(() => {
+        void invoke("close_ctx_menu");
+        setTimeout(() => void refresh(), 600);
+        setTimeout(() => void refresh(), 1800);
+      });
+    },
+  });
+  let ext: MenuItem[];
+  if (modern.length) {
+    ext = modern.map(modernToItem);
+  } else {
+    ext = [];
+    for (const n of tree) {
+      if (n.separator) continue;
+      if (n.verb && STD_CTX_VERBS.has(n.verb.toLowerCase())) continue;
+      if (!isModernExt(n.label)) continue;
+      ext.push(nodeToItem(n));
+    }
+  }
+  // 固定到"开始"：经典树里找到对应 verb 后作为标准段项呈现
+  const mid: MenuItem[] = [];
+  const pinStart = tree.find((n) => n.verb.toLowerCase() === "pintostartscreen");
+  if (pinStart) {
+    mid.push({
+      label: "固定到“开始”", glyph: "&#xE718;",
+      onClick: () => {
+        ctxMenuOpen = false;
+        void invoke<MenuResult>("invoke_ctx_item", { id: pinStart.id }).then((r) => handleMenuResult(r, sel));
+      },
+    });
+  }
+  const extra: MenuItem[] = [];
+  if (ext.length) extra.push({ separator: true }, ...ext);
+  if (tree.length) {
+    extra.push({ separator: true }, {
+      label: "显示更多选项", glyph: "&#xE712;",
+      submenu: tree.map(nodeToItem),
+    });
+  }
+  showCtxMenuAt(x, y, stdItems(extra, mid), sel);
+  ctxUiOpen = true;
+  ctxMenuOpen = tree.length > 0;
 }
 
 async function showBackgroundMenu() {
@@ -2116,7 +2342,10 @@ function bindEvents() {
   $("cmd-paste").onclick = () => void runVerb("paste");
   $("cmd-rename").onclick = () => startRename();
   $("cmd-delete").onclick = () => void runVerb("delete");
-  $("cmd-share").onclick = () => void showItemMenu();
+  $("cmd-share").onclick = (ev) => {
+    const r = (ev.currentTarget as HTMLElement).getBoundingClientRect();
+    void showItemMenu(r.left, r.bottom + 4);
+  };
   $("cmd-sort").onclick = (ev) => showSortMenu(ev.currentTarget as HTMLElement);
   $("cmd-view").onclick = (ev) => showViewMenu(ev.currentTarget as HTMLElement);
   $("cmd-more").onclick = (ev) => showMoreMenu(ev.currentTarget as HTMLElement);
@@ -2151,7 +2380,8 @@ function bindEvents() {
       ev.preventDefault();
       tab.selection = new Set(sortedEntries(tab).map((e) => e.parse_path));
       renderList(); renderStatus();
-    } else if (ev.ctrlKey && ev.key.toLowerCase() === "c") { void runVerb("copy"); }
+    } else if (ev.ctrlKey && ev.shiftKey && ev.key.toLowerCase() === "c") { copyAddresses(); }
+    else if (ev.ctrlKey && ev.key.toLowerCase() === "c") { void runVerb("copy"); }
     else if (ev.ctrlKey && ev.key.toLowerCase() === "z") { void doUndo(); }
     else if (ev.ctrlKey && ev.key.toLowerCase() === "x") { void runVerb("cut"); }
     else if (ev.ctrlKey && ev.key.toLowerCase() === "v") { void runVerb("paste"); }
@@ -2160,6 +2390,7 @@ function bindEvents() {
     else if (ev.key === "Delete") { void runVerb("delete"); }
     else if (ev.key === "F2") { startRename(); }
     else if (ev.key === "F5") { void refresh(); }
+    else if (ev.altKey && ev.key === "Enter") { showProperties(); }
     else if (ev.key === "Enter") {
       const sel = [...tab.selection];
       if (sel.length === 1) {

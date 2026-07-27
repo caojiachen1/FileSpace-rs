@@ -393,9 +393,50 @@ body {
 .dd-glyph { width: 16px; font-size: 15px; color: var(--text-2); }
 .dd-img { width: 16px; height: 16px; vertical-align: middle; }
 .dd-label { flex: 1; }
+.dd-accel { color: var(--text-3); font-size: 12px; margin-left: 28px; }
 .dd-arrow { font-size: 9px; color: var(--text-3); }
 /* 菜单背景较亮（#2c2c2c），分隔线需用浅色才可见（--divider 与菜单背景几乎同色） */
 .dropdown-sep { height: 1px; background: rgba(255, 255, 255, 0.12); margin: 4px 8px; }
+
+/* Fluent 右键菜单（一级）：不滚动，完整显示；位置由 JS 上移适配 */
+.dropdown.ctx-menu {
+  max-height: none;
+  overflow-y: visible;
+  min-width: 280px;
+}
+
+/* 悬停子菜单（显示更多选项等）：可用满视口高度，一屏展示更多内容 */
+.dropdown.submenu-tall {
+  max-height: calc(100vh - 16px);
+}
+
+/* ===== Fluent 右键菜单快捷条（剪切/复制/重命名/删除） ===== */
+.ctx-quickbar {
+  display: flex;
+  gap: 2px;
+  padding: 2px 2px 6px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+}
+.ctx-qbtn {
+  flex: 1;
+  min-width: 64px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  padding: 8px 16px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text);
+  font-size: 12px;
+  font-family: inherit;
+  white-space: nowrap;
+}
+.ctx-qbtn:hover:not(:disabled) { background: var(--bg-hover); }
+.ctx-qbtn:disabled { color: #6a6a6a; }
+.ctx-qbtn .fluent { font-size: 16px; }
 
 /* ===== 地址栏输入 ===== */
 .address-input {

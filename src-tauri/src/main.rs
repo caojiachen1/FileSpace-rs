@@ -5,6 +5,7 @@ mod commands;
 mod shell_icons;
 mod shell_items;
 mod shell_menu;
+mod shell_modern;
 mod shell_thread;
 mod shell_watch;
 
@@ -31,6 +32,11 @@ fn main() {
             commands::system_action,
             commands::get_new_menu,
             commands::invoke_new_item,
+            commands::get_ctx_menu,
+            commands::invoke_ctx_item,
+            commands::close_ctx_menu,
+            commands::get_modern_menu,
+            commands::invoke_modern_item,
             commands::get_image_size,
             commands::get_item_details,
         ])

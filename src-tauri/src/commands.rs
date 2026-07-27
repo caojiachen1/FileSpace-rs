@@ -104,6 +104,36 @@ pub async fn invoke_new_item(id: u32) -> bool {
     run_on_shell(move || shell_menu::invoke_new(id))
 }
 
+/// Fluent 右键菜单：获取完整经典菜单树
+#[tauri::command]
+pub async fn get_ctx_menu(selection: Vec<String>) -> Vec<shell_menu::CtxNode> {
+    run_on_shell(move || shell_menu::get_ctx_menu(selection))
+}
+
+#[tauri::command]
+pub async fn invoke_ctx_item(id: u32) -> MenuResult {
+    run_on_shell(move || shell_menu::invoke_ctx(id))
+}
+
+#[tauri::command]
+pub async fn close_ctx_menu() {
+    run_on_shell(|| {
+        shell_menu::close_ctx();
+        crate::shell_modern::clear();
+    })
+}
+
+/// Win11 现代菜单扩展（Windows.FileExplorerContextMenus 契约 + IExplorerCommand）
+#[tauri::command]
+pub async fn get_modern_menu(selection: Vec<String>) -> Vec<crate::shell_modern::ModernNode> {
+    run_on_shell(move || crate::shell_modern::get_modern_menu(selection))
+}
+
+#[tauri::command]
+pub async fn invoke_modern_item(mid: u32) -> bool {
+    run_on_shell(move || crate::shell_modern::invoke_modern(mid))
+}
+
 /// 图片分辨率（详细信息窗格用）
 #[tauri::command]
 pub async fn get_image_size(path: String) -> Option<(u32, u32)> {
