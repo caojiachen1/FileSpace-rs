@@ -74,6 +74,11 @@ pub async fn invoke_verb(
 }
 
 #[tauri::command]
+pub async fn quick_access_verb(path: String, verb: String) -> bool {
+    run_on_shell(move || shell_menu::quick_access_verb(&path, &verb))
+}
+
+#[tauri::command]
 pub async fn rename_item(path: String, new_name: String) -> Result<(), String> {
     run_on_shell(move || shell_menu::rename(&path, &new_name))
 }

@@ -26,6 +26,7 @@ fn main() {
             commands::show_context_menu,
             commands::open_item,
             commands::invoke_verb,
+            commands::quick_access_verb,
             commands::rename_item,
             commands::create_folder,
             commands::watch_folder,

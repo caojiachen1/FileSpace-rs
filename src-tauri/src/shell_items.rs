@@ -51,6 +51,8 @@ pub struct ShellEntry {
     pub drive_total: Option<u64>,
     pub drive_free: Option<u64>,
     pub drive_text: String,
+    /// 仅快速访问：用户置顶（true）或最近访问的常用文件夹（false）
+    pub pinned: bool,
 }
 
 #[derive(Serialize)]
@@ -81,7 +83,7 @@ pub fn to_wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-fn pwstr_to_string_free(p: PWSTR) -> String {
+pub(crate) fn pwstr_to_string_free(p: PWSTR) -> String {
     unsafe {
         let s = if p.is_null() { String::new() } else { p.to_string().unwrap_or_default() };
         CoTaskMemFree(Some(p.as_ptr() as _));
@@ -252,6 +254,7 @@ pub fn entry_from_item(item: &IShellItem2) -> Option<ShellEntry> {
             drive_total,
             drive_free,
             drive_text,
+            pinned: false,
         })
     }
 }
@@ -342,13 +345,57 @@ pub fn folder_listing(path: &str) -> Result<FolderListing, String> {
     })
 }
 
+/// 快速访问列表：枚举与资源管理器相同的 shell 命名空间，
+/// 通过 System.Home.IsPinned 属性区分"已固定"与"最近访问的常用文件夹"，
+/// 置顶项排前（各自保持系统枚举顺序），与资源管理器导航窗格完全一致
+fn quick_access_entries() -> Vec<ShellEntry> {
+    use windows::core::w;
+    use windows::Win32::UI::Shell::PropertiesSystem::PSGetPropertyKeyFromName;
+
+    let mut pin_key = PROPERTYKEY::default();
+    let has_pin_key =
+        unsafe { PSGetPropertyKeyFromName(w!("System.Home.IsPinned"), &mut pin_key).is_ok() };
+
+    let Ok(item) = item_from_path(QUICK_ACCESS) else {
+        return Vec::new();
+    };
+    let mut out: Vec<ShellEntry> = Vec::new();
+    unsafe {
+        let Ok(enumerator) = item.BindToHandler::<_, IEnumShellItems>(None, &BHID_EnumItems) else {
+            return Vec::new();
+        };
+        loop {
+            let mut fetched = 0u32;
+            let mut items: [Option<IShellItem>; 64] = std::array::from_fn(|_| None);
+            let _ = enumerator.Next(&mut items, Some(&mut fetched));
+            if fetched == 0 {
+                break;
+            }
+            for it in items.iter().take(fetched as usize).flatten() {
+                let Ok(item2) = it.cast::<IShellItem2>() else { continue };
+                let Some(mut entry) = entry_from_item(&item2) else { continue };
+                // 导航窗格只显示文件夹（Win11"主文件夹"里的最近文件被排除）
+                if !entry.is_folder {
+                    continue;
+                }
+                // 属性不可用（旧系统）时全部按置顶处理
+                entry.pinned = if has_pin_key {
+                    item2.GetBool(&pin_key).map(|b| b.as_bool()).unwrap_or(false)
+                } else {
+                    true
+                };
+                out.push(entry);
+            }
+        }
+    }
+    // 稳定排序：置顶在前，组内保持系统顺序（即资源管理器显示顺序）
+    out.sort_by_key(|e| !e.pinned);
+    out
+}
+
 /// 侧栏数据：快速访问（钉住的文件夹）+ 此电脑子项 + 驱动器
 pub fn sidebar_data() -> SidebarData {
-    let quick_access = enumerate_folder(QUICK_ACCESS)
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|e| e.is_folder)
-        .collect();
+    let quick_access = quick_access_entries();
 
     let this_pc: Vec<ShellEntry> = enumerate_folder(THIS_PC).unwrap_or_default();
     let is_drive = |e: &ShellEntry| {

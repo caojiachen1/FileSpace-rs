@@ -24,6 +24,7 @@ interface ShellEntry {
   drive_total: number | null;
   drive_free: number | null;
   drive_text: string;
+  pinned: boolean;
 }
 interface Crumb { name: string; parse_path: string; }
 interface FolderListing {
@@ -593,11 +594,10 @@ function sideItem(entry: ShellEntry, opts: { pin?: boolean; indent?: number; exp
     el.append(pin);
   }
   el.onclick = () => void navigate(entry.parse_path);
-  el.oncontextmenu = async (ev) => {
+  el.oncontextmenu = (ev) => {
     ev.preventDefault();
-    const r = await invoke<MenuResult>("show_context_menu", { selection: [entry.parse_path], background: null, state: null });
-    if (r.action === "navigate") void navigate(entry.parse_path);
-    else if (r.action === "invoked") setTimeout(() => void loadSidebar(), 800);
+    ev.stopPropagation();
+    void showSideItemMenu(ev.clientX, ev.clientY, entry, el);
   };
   return el;
 }
@@ -662,7 +662,7 @@ function renderSidebar() {
   if (!sidebar) return;
 
   for (const qa of sidebar.quick_access) {
-    sb.append(sideItem(qa, { pin: true, expander: "none" }));
+    sb.append(sideItem(qa, { pin: qa.pinned, expander: "none" }));
   }
   const div = document.createElement("div");
   div.className = "side-divider";
@@ -1968,12 +1968,12 @@ function buildCtxQuickbar(sel: string[]): HTMLElement {
 
 // 在鼠标坐标附近弹出带快捷条的 Fluent 右键菜单；一级菜单不滚动，
 // 放不下时整体上移完整显示（位置可脱离鼠标）
-function showCtxMenuAt(x: number, y: number, items: MenuItem[], sel: string[]) {
+function showCtxMenuAt(x: number, y: number, items: MenuItem[], sel: string[], quickbar?: HTMLElement) {
   closeDropdown();
   const menu = wrapMenu(buildMenu(items));
   const inner = menu.firstElementChild as HTMLElement;
   inner.classList.add("ctx-menu");
-  inner.prepend(buildCtxQuickbar(sel));
+  inner.prepend(quickbar ?? buildCtxQuickbar(sel));
   document.body.append(menu);
   // 极端情况（菜单比视口还高）才回退到内部滚动
   if (inner.offsetHeight > window.innerHeight - 16) {
@@ -2105,6 +2105,201 @@ async function showItemMenu(x: number, y: number) {
     });
   }
   showCtxMenuAt(x, y, stdItems(extra, mid), sel);
+  ctxUiOpen = true;
+  ctxMenuOpen = tree.length > 0;
+}
+
+/* ===================== 侧栏 Fluent 右键菜单（与文件列表完全一致的样式） ===================== */
+
+// 侧栏项内联重命名（与资源管理器导航窗格一致）
+function startSideRename(el: HTMLElement, entry: ShellEntry) {
+  const label = el.querySelector<HTMLElement>(".side-label");
+  if (!label) return;
+  const input = document.createElement("input");
+  input.className = "rename-input";
+  input.value = entry.name;
+  label.replaceWith(input);
+  input.focus();
+  input.select();
+  let done = false;
+  const commit = async () => {
+    if (done) return;
+    done = true;
+    const newName = input.value.trim();
+    if (newName && newName !== entry.name) {
+      try {
+        await invoke("rename_item", { path: entry.parse_path, newName });
+      } catch (e) { console.error(e); }
+    }
+    void loadSidebar();
+    void refresh();
+  };
+  input.onblur = () => void commit();
+  input.onkeydown = (ev) => {
+    ev.stopPropagation();
+    if (ev.key === "Enter") void commit();
+    if (ev.key === "Escape") { done = true; void loadSidebar(); }
+  };
+  input.onclick = (ev) => ev.stopPropagation();
+}
+
+// 侧栏操作后延迟刷新侧栏与当前列表（shell 操作是异步落盘的）
+function sideRefreshLater() {
+  setTimeout(() => { void loadSidebar(); void refresh(); }, 600);
+  setTimeout(() => { void loadSidebar(); void refresh(); }, 1800);
+}
+
+// 侧栏版顶部快捷条：直接对侧栏项执行 verb（虚拟节点/驱动器禁用相应操作）
+function buildSideQuickbar(entry: ShellEntry, el: HTMLElement): HTMLElement {
+  const bar = document.createElement("div");
+  bar.className = "ctx-quickbar";
+  const sel = [entry.parse_path];
+  const virt = !entry.fs_path;
+  const isDrive = /^[A-Za-z]:\\$/.test(entry.parse_path);
+  const btn = (glyph: string, label: string, onClick: () => void, disabled: boolean) => {
+    const b = document.createElement("button");
+    b.className = "ctx-qbtn";
+    b.disabled = disabled;
+    b.innerHTML = `<span class="fluent">${glyph}</span><span>${label}</span>`;
+    b.onclick = () => { onClick(); closeDropdown(); };
+    bar.append(b);
+  };
+  const verb = (v: string) => {
+    void invoke("invoke_verb", { selection: sel, background: null, verb: v }).then(() => {
+      if (v === "cut") { cutPaths = new Set(sel); renderList(); return; }
+      if (v === "copy") return;
+      cutPaths = new Set();
+      sideRefreshLater();
+    });
+  };
+  btn("&#xE8C6;", "剪切", () => verb("cut"), virt || isDrive);
+  btn("&#xE8C8;", "复制", () => verb("copy"), virt);
+  btn("&#xE8AC;", "重命名", () => startSideRename(el, entry), virt || isDrive);
+  btn("&#xE74D;", "删除", () => verb("delete"), virt || isDrive);
+  return bar;
+}
+
+// 侧栏项 Fluent 右键菜单：结构与文件列表一致（标准段 + 现代扩展段 + 显示更多选项）
+async function showSideItemMenu(x: number, y: number, entry: ShellEntry, el: HTMLElement) {
+  const sel = [entry.parse_path];
+  const token = ++ctxToken;
+  let tree: CtxNode[] = [];
+  let modern: ModernNode[] = [];
+  try {
+    [tree, modern] = await Promise.all([
+      invoke<CtxNode[]>("get_ctx_menu", { selection: sel }).catch(() => [] as CtxNode[]),
+      invoke<ModernNode[]>("get_modern_menu", { selection: sel }).catch(() => [] as ModernNode[]),
+    ]);
+  } catch (e) { console.error(e); }
+  if (token !== ctxToken) {
+    if (tree.length) void invoke("close_ctx_menu");
+    return;
+  }
+
+  const onResult = (r: MenuResult) => {
+    if (r.action === "navigate") { void navigate(entry.parse_path); return; }
+    if (r.action === "rename") { startSideRename(el, entry); return; }
+    if (r.action === "invoked") {
+      if (r.verb === "cut") { cutPaths = new Set(sel); renderList(); return; }
+      if (r.verb === "copy") return;
+      cutPaths = new Set();
+      sideRefreshLater();
+    }
+  };
+  const nodeToItem = (n: CtxNode): MenuItem => {
+    if (n.separator) return { separator: true };
+    const clickable = n.children.length === 0 && n.id >= 1 && n.id <= 0x7fff;
+    return {
+      label: n.label,
+      accel: n.accel || undefined,
+      iconImg: n.icon ?? undefined,
+      submenu: n.children.length ? n.children.map(nodeToItem) : undefined,
+      disabled: !clickable && n.children.length === 0,
+      onClick: clickable
+        ? () => {
+            ctxMenuOpen = false;
+            void invoke<MenuResult>("invoke_ctx_item", { id: n.id }).then(onResult);
+          }
+        : undefined,
+    };
+  };
+  const modernToItem = (n: ModernNode): MenuItem => ({
+    label: n.label,
+    iconImg: n.icon ?? undefined,
+    submenu: n.children.length ? n.children.map(modernToItem) : undefined,
+    onClick: n.children.length ? undefined : () => {
+      ctxMenuOpen = false;
+      void invoke("invoke_modern_item", { mid: n.mid }).then(() => {
+        void invoke("close_ctx_menu");
+        sideRefreshLater();
+      });
+    },
+  });
+
+  let ext: MenuItem[];
+  if (modern.length) {
+    ext = modern.map(modernToItem);
+  } else {
+    ext = [];
+    for (const n of tree) {
+      if (n.separator) continue;
+      if (n.verb && STD_CTX_VERBS.has(n.verb.toLowerCase())) continue;
+      if (!isModernExt(n.label)) continue;
+      ext.push(nodeToItem(n));
+    }
+  }
+
+  const items: MenuItem[] = [
+    { label: "打开", glyph: "&#xE8E5;", accel: "Enter", onClick: () => void navigate(entry.parse_path) },
+    { label: "在新标签页中打开", glyph: "&#xE8AD;", onClick: () => addTab(entry.parse_path) },
+  ];
+  // 固定/取消固定：与资源管理器同款 shell verb，完成后刷新侧栏
+  const pinVerb = (v: string) => {
+    void invoke("invoke_verb", { selection: sel, background: null, verb: v }).then(() => void loadSidebar());
+  };
+  const canPin = tree.some((n) => n.verb.toLowerCase() === "pintohome");
+  if (entry.pinned) {
+    items.push({
+      label: "从快速访问取消固定", glyph: "&#xE77A;",
+      onClick: () => {
+        void invoke("quick_access_verb", { path: entry.parse_path, verb: "unpinfromhome" }).then(() => {
+          void loadSidebar();
+          setTimeout(() => void loadSidebar(), 800);
+        });
+      },
+    });
+  } else if (canPin) {
+    items.push({ label: "固定到快速访问", glyph: "&#xE718;", onClick: () => pinVerb("pintohome") });
+  }
+  const pinStart = tree.find((n) => n.verb.toLowerCase() === "pintostartscreen");
+  if (pinStart) {
+    items.push({
+      label: "固定到“开始”", glyph: "&#xE718;",
+      onClick: () => {
+        ctxMenuOpen = false;
+        void invoke<MenuResult>("invoke_ctx_item", { id: pinStart.id }).then(onResult);
+      },
+    });
+  }
+  if (entry.fs_path) {
+    items.push({
+      label: "复制文件地址", glyph: "&#xE8C8;", accel: "Ctrl+Shift+C",
+      onClick: () => void navigator.clipboard.writeText(entry.fs_path!),
+    });
+  }
+  items.push({
+    label: "属性", glyph: "&#xE90F;", accel: "Alt+Enter",
+    onClick: () => void invoke("invoke_verb", { selection: sel, background: null, verb: "properties" }),
+  });
+  if (ext.length) items.push({ separator: true }, ...ext);
+  if (tree.length) {
+    items.push({ separator: true }, {
+      label: "显示更多选项", glyph: "&#xE712;",
+      submenu: tree.map(nodeToItem),
+    });
+  }
+
+  showCtxMenuAt(x, y, items, sel, buildSideQuickbar(entry, el));
   ctxUiOpen = true;
   ctxMenuOpen = tree.length > 0;
 }

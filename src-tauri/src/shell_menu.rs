@@ -316,6 +316,11 @@ pub fn invoke_verb_direct(selection: Vec<String>, background: Option<String>, ve
             Err(_) => return false,
         }
     };
+    invoke_menu_verb(&menu_obj, verb)
+}
+
+/// QueryContextMenu 后按 verb 字符串 InvokeCommand
+fn invoke_menu_verb(menu_obj: &IContextMenu, verb: &str) -> bool {
     unsafe {
         let hmenu = match CreatePopupMenu() {
             Ok(h) => h,
@@ -344,6 +349,50 @@ pub fn invoke_verb_direct(selection: Vec<String>, background: Option<String>, ve
             .is_ok();
         let _ = DestroyMenu(hmenu);
         ok
+    }
+}
+
+/// 快速访问项上的 verb（unpinfromhome/removefromhome）：
+/// 这类 verb 只在快速访问命名空间枚举出的子项上生效，
+/// 对按文件系统路径重新解析的项执行会被 shell 静默忽略（pintohome 无此限制）
+pub fn quick_access_verb(path: &str, verb: &str) -> bool {
+    use crate::shell_items::{pwstr_to_string_free, QUICK_ACCESS};
+    use windows::Win32::UI::Shell::{
+        BHID_EnumItems, IEnumShellItems, SIGDN_DESKTOPABSOLUTEPARSING,
+    };
+    let Ok(folder) = item_from_path(QUICK_ACCESS) else {
+        return false;
+    };
+    unsafe {
+        let Ok(enumerator) = folder.BindToHandler::<_, IEnumShellItems>(None, &BHID_EnumItems)
+        else {
+            return false;
+        };
+        loop {
+            let mut fetched = 0u32;
+            let mut items: [Option<windows::Win32::UI::Shell::IShellItem>; 16] =
+                std::array::from_fn(|_| None);
+            let _ = enumerator.Next(&mut items, Some(&mut fetched));
+            if fetched == 0 {
+                return false;
+            }
+            for it in items.iter().take(fetched as usize).flatten() {
+                let parse = it
+                    .GetDisplayName(SIGDN_DESKTOPABSOLUTEPARSING)
+                    .map(pwstr_to_string_free)
+                    .unwrap_or_default();
+                if parse != path {
+                    continue;
+                }
+                let Ok(menu_obj) = it.BindToHandler::<_, IContextMenu>(
+                    None,
+                    &windows::Win32::UI::Shell::BHID_SFUIObject,
+                ) else {
+                    return false;
+                };
+                return invoke_menu_verb(&menu_obj, verb);
+            }
+        }
     }
 }
 
