@@ -2731,10 +2731,9 @@ async function showBackgroundMenu(x: number, y: number) {
   }
   items.push({ label: "新建", glyph: "&#xE710;", submenu: newSub });
   items.push({ separator: true });
-  items.push({
-    label: "属性", glyph: "&#xE90F;", accel: "Alt+Enter",
-    onClick: () => void invoke("invoke_verb", { selection: [], background: path, verb: "properties" }),
-  });
+  // 文件夹自身属性：背景菜单打开前已清空选中，showProperties 会回落到当前文件夹；
+  // 不能用背景菜单对象按 verb 调用（其"属性"项无法按 properties verb 解析，会静默失败）
+  items.push({ label: "属性", glyph: "&#xE90F;", accel: "Alt+Enter", onClick: showProperties });
   if (ext.length) items.push({ separator: true }, ...ext);
   if (tree.length) {
     items.push({ separator: true }, { label: "显示更多选项", glyph: "&#xE712;", submenu: moreSub });
