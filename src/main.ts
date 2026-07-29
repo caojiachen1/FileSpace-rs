@@ -1655,6 +1655,21 @@ function slideOut(wrap: HTMLElement) {
     { duration: 150, easing: DD_EASE },
   );
   anim.onfinish = () => wrap.remove();
+  anim.oncancel = () => wrap.remove();
+  // 兜底：动画回调偶发不触发时强制移除，避免菜单（尤其二级子菜单）永久残留
+  window.setTimeout(() => wrap.remove(), 220);
+}
+
+// 关闭某菜单及其派生的所有后代子菜单（避免三级及更深子菜单成为孤儿残留）
+function slideOutWithChildren(wrap: HTMLElement) {
+  document.querySelectorAll<HTMLElement>(".dropdown-wrap").forEach((w) => {
+    let p = (w as any).__ownerWrap as HTMLElement | undefined;
+    while (p) {
+      if (p === wrap) { slideOut(w); break; }
+      p = (p as any).__ownerWrap;
+    }
+  });
+  slideOut(wrap);
 }
 
 function closeDropdown() {
@@ -1733,7 +1748,12 @@ function buildMenu(items: MenuItem[]): HTMLElement {
       let sub: HTMLElement | null = null;
       const openSub = () => {
         if (sub) return;
+        // 所属菜单正在关闭/已移除时不再弹出子菜单，避免关闭后产生孤儿子菜单残留
+        const ownerWrap = menu.closest<HTMLElement>(".dropdown-wrap");
+        if (!ownerWrap || ownerWrap.dataset.closing || !ownerWrap.isConnected) return;
         sub = wrapMenu(buildMenu(it.submenu!));
+        // 记录父链，供级联关闭后代子菜单
+        (sub as any).__ownerWrap = ownerWrap;
         const subInner = sub.firstElementChild as HTMLElement;
         // 悬停子菜单（如"显示更多选项"）：尽量用满视口高度，一屏展示更多内容
         subInner.classList.add("submenu-tall");
@@ -1755,7 +1775,7 @@ function buildMenu(items: MenuItem[]): HTMLElement {
         });
         openSub();
       };
-      (el as any).__closeSub = () => { if (sub) { slideOut(sub); sub = null; } };
+      (el as any).__closeSub = () => { if (sub) { slideOutWithChildren(sub); sub = null; } };
       el.onclick = (ev) => { ev.stopPropagation(); openSub(); };
     } else {
       el.onmouseenter = () => {
