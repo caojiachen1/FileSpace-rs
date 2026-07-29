@@ -437,6 +437,8 @@ body {
 .ctx-qbtn:hover:not(:disabled) { background: var(--bg-hover); }
 .ctx-qbtn:disabled { color: #6a6a6a; }
 .ctx-qbtn .fluent { font-size: 16px; }
+/* 背景菜单快捷条：单按钮不拉伸，靠左显示 */
+.ctx-quickbar.single .ctx-qbtn { flex: 0 0 auto; }
 
 /* ===== 地址栏输入 ===== */
 .address-input {
@@ -604,6 +606,29 @@ body {
 .drive-bar-fill { height: 100%; background: #26a0da; }
 .drive-bar-fill.low { background: #c42b1c; }
 .drive-text { font-size: 12px; color: var(--text-2); }
+
+/* 设备和驱动器磁贴：布局与颜色与资源管理器完全一致（深色主题截图取色） */
+.pc-drives { grid-template-columns: repeat(auto-fill, 292px); gap: 2px 5px; }
+.pc-tile {
+  gap: 14px;
+  padding: 5px 4px 5px 3px;
+  border-radius: 0;
+  border: 1px solid transparent;
+}
+.pc-tile.selected { background: #4d4d4d; }
+.pc-tile.selected:hover { background: #505050; }
+/* 焦点项（锚点）：浅灰焦点框，与资源管理器选中聚焦态一致 */
+.pc-tile.focus { border-color: #c3c3c3; }
+.pc-tile .drive-name { font-size: 12px; line-height: 16px; margin-bottom: 4px; color: #fff; }
+.pc-tile .drive-bar {
+  height: 18px;
+  max-width: none;
+  margin-bottom: 4px;
+  background: #e6e6e6;
+  border-color: #bcbcbc;
+}
+.pc-tile .drive-bar-fill { background: #0070cb; }
+.pc-tile .drive-text { font-size: 12px; color: #fff; }
 
 /* ===== 详细信息/预览窗格 ===== */
 .side-pane {

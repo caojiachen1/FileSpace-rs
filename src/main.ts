@@ -1020,7 +1020,7 @@ function renderList() {
     tab.selection.clear();
     renderList();
     renderStatus();
-    void showBackgroundMenu();
+    void showBackgroundMenu(ev.clientX, ev.clientY);
   };
   body.onclick = (ev) => {
     // 框选拖拽结束后的 click 不清选中
@@ -1334,11 +1334,11 @@ function renderThisPc(body: HTMLElement, tab: Tab, entries: ShellEntry[]) {
     if (pcGroupCollapsed[label]) return;
 
     const grid = document.createElement("div");
-    grid.className = "pc-group";
+    grid.className = "pc-group pc-drives";
     items.forEach((e) => {
       const idx = sortedEntries(tab).indexOf(e);
       const card = document.createElement("div");
-      card.className = "drive-card";
+      card.className = "drive-card pc-tile";
       const img = makeItemIcon(e, 48, false);
       img.className = "drive-icon";
       const meta = document.createElement("div");
@@ -1368,6 +1368,8 @@ function renderThisPc(body: HTMLElement, tab: Tab, entries: ShellEntry[]) {
       }
       card.append(img, meta);
       bindItemEvents(card, e, idx, tab);
+      // 锚点（焦点）项显示浅灰焦点框，与资源管理器一致
+      if (idx === tab.anchorIndex && tab.selection.has(e.parse_path)) card.classList.add("focus");
       grid.append(card);
     });
     body.append(grid);
@@ -2177,13 +2179,13 @@ function buildCtxQuickbar(sel: string[]): HTMLElement {
 }
 
 // 在鼠标坐标附近弹出带快捷条的 Fluent 右键菜单；一级菜单不滚动，
-// 放不下时整体上移完整显示（位置可脱离鼠标）
-function showCtxMenuAt(x: number, y: number, items: MenuItem[], sel: string[], quickbar?: HTMLElement) {
+// 放不下时整体上移完整显示（位置可脱离鼠标）；quickbar 传 null 表示不显示快捷条
+function showCtxMenuAt(x: number, y: number, items: MenuItem[], sel: string[], quickbar?: HTMLElement | null) {
   closeDropdown();
   const menu = wrapMenu(buildMenu(items));
   const inner = menu.firstElementChild as HTMLElement;
   inner.classList.add("ctx-menu");
-  inner.prepend(quickbar ?? buildCtxQuickbar(sel));
+  if (quickbar !== null) inner.prepend(quickbar ?? buildCtxQuickbar(sel));
   document.body.append(menu);
   // 极端情况（菜单比视口还高）才回退到内部滚动
   if (inner.offsetHeight > window.innerHeight - 16) {
@@ -2211,6 +2213,8 @@ async function showItemMenu(x: number, y: number) {
   const sel = [...tab.selection];
   if (sel.length === 0) return;
   const entry = sel.length === 1 ? tab.listing?.entries.find((e) => e.parse_path === sel[0]) : undefined;
+  // 磁盘（驱动器根）：菜单结构与资源管理器驱动器菜单一致
+  const isDriveEntry = !!entry && /^[A-Za-z]:\\$/.test(entry.parse_path);
   const token = ++ctxToken;
 
   const stdItems = (extra: MenuItem[], mid: MenuItem[] = []): MenuItem[] => {
@@ -2237,10 +2241,12 @@ async function showItemMenu(x: number, y: number) {
   // 加载完成后一次性显示菜单（经典树 + 现代扩展并行获取，后端已做实例/图标缓存）
   let tree: CtxNode[] = [];
   let modern: ModernNode[] = [];
+  let canPaste = false;
   try {
-    [tree, modern] = await Promise.all([
+    [tree, modern, canPaste] = await Promise.all([
       invoke<CtxNode[]>("get_ctx_menu", { selection: sel }).catch(() => [] as CtxNode[]),
       invoke<ModernNode[]>("get_modern_menu", { selection: sel }).catch(() => [] as ModernNode[]),
+      isDriveEntry ? invoke<boolean>("clipboard_has_files").catch(() => false) : Promise.resolve(false),
     ]);
   } catch (e) { console.error(e); }
   // 期间又发起了新菜单：释放后端实例
@@ -2314,9 +2320,83 @@ async function showItemMenu(x: number, y: number) {
       submenu: tree.map(nodeToItem),
     });
   }
-  showCtxMenuAt(x, y, stdItems(extra, mid), sel);
+  if (entry && isDriveEntry) {
+    // 驱动器菜单：打开/新标签页/新窗口/格式化/固定到快速访问/固定到开始/属性（与资源管理器一致）
+    const driveItems: MenuItem[] = [
+      { label: "打开", glyph: "&#xE8E5;", accel: "Enter", onClick: () => void openEntry(entry) },
+      { label: "在新标签页中打开", glyph: "&#xE8AD;", onClick: () => addTab(entry.parse_path) },
+      { label: "在新窗口中打开", glyph: "&#xE8A7;", onClick: () => void invoke("open_new_window", { path: entry.parse_path }) },
+      { label: "格式化...", glyph: "&#xE977;", onClick: () => void invoke("format_drive", { letter: entry.parse_path[0] }) },
+      {
+        label: "固定到快速访问", glyph: "&#xE718;",
+        onClick: () => {
+          void invoke("invoke_verb", { selection: sel, background: null, verb: "pintohome" }).then(() => void loadSidebar());
+        },
+      },
+      ...mid, // 固定到"开始"（经典树 verb）
+      { label: "属性", glyph: "&#xE90F;", accel: "Alt+Enter", onClick: showProperties },
+      ...extra,
+    ];
+    showCtxMenuAt(x, y, driveItems, sel, buildDriveQuickbar(entry, canPaste));
+  } else {
+    showCtxMenuAt(x, y, stdItems(extra, mid), sel);
+  }
   ctxUiOpen = true;
   ctxMenuOpen = tree.length > 0;
+}
+
+// 磁盘卡片版快捷条：复制/粘贴/重命名（与资源管理器驱动器菜单一致）
+function buildDriveQuickbar(entry: ShellEntry, canPaste: boolean): HTMLElement {
+  const bar = document.createElement("div");
+  bar.className = "ctx-quickbar";
+  const btn = (glyph: string, label: string, onClick: () => void, disabled = false) => {
+    const b = document.createElement("button");
+    b.className = "ctx-qbtn";
+    b.disabled = disabled;
+    b.innerHTML = `<span class="fluent">${glyph}</span><span>${label}</span>`;
+    b.onclick = () => { onClick(); closeDropdown(); };
+    bar.append(b);
+  };
+  btn("&#xE8C8;", "复制", () => void invoke("invoke_verb", { selection: [entry.parse_path], background: null, verb: "copy" }));
+  // 粘贴：粘进驱动器根目录；剪贴板无文件时置灰
+  btn("&#xE77F;", "粘贴", () => void invoke("invoke_verb", { selection: [], background: entry.parse_path, verb: "paste" }), !canPaste);
+  btn("&#xE8AC;", "重命名", () => startDriveRename(entry));
+  return bar;
+}
+
+// 磁盘卡片内联重命名（修改卷标，与资源管理器一致）
+function startDriveRename(entry: ShellEntry) {
+  const card = document.querySelector<HTMLElement>(`.drive-card[data-path="${CSS.escape(entry.parse_path)}"]`);
+  const label = card?.querySelector<HTMLElement>(".drive-name");
+  if (!label) return;
+  // 去掉尾部盘符后缀，只编辑卷标部分
+  const orig = entry.name.replace(/\s*\([A-Za-z]:\)$/, "");
+  const input = document.createElement("input");
+  input.className = "rename-input";
+  input.value = orig;
+  label.replaceWith(input);
+  input.focus();
+  input.select();
+  let done = false;
+  const commit = async () => {
+    if (done) return;
+    done = true;
+    const newName = input.value.trim();
+    if (newName && newName !== orig) {
+      try {
+        await invoke("rename_item", { path: entry.parse_path, newName });
+      } catch (e) { console.error(e); }
+    }
+    void refresh();
+    void loadSidebar();
+  };
+  input.onblur = () => void commit();
+  input.onkeydown = (ev) => {
+    ev.stopPropagation();
+    if (ev.key === "Enter") void commit();
+    if (ev.key === "Escape") { done = true; void refresh(); }
+  };
+  input.onclick = (ev) => ev.stopPropagation();
 }
 
 /* ===================== 侧栏 Fluent 右键菜单（与文件列表完全一致的样式） ===================== */
@@ -2514,16 +2594,156 @@ async function showSideItemMenu(x: number, y: number, entry: ShellEntry, el: HTM
   ctxMenuOpen = tree.length > 0;
 }
 
-async function showBackgroundMenu() {
+// 背景菜单版顶部快捷条：仅"粘贴"靠左显示（与 Win11 资源管理器空白处菜单一致）；
+// 无可粘贴对象时由调用方直接不显示整条快捷条
+function buildBgQuickbar(): HTMLElement {
+  const bar = document.createElement("div");
+  bar.className = "ctx-quickbar single";
+  const b = document.createElement("button");
+  b.className = "ctx-qbtn";
+  b.innerHTML = `<span class="fluent">&#xE77F;</span><span>粘贴</span>`;
+  b.onclick = () => { void runVerb("paste"); closeDropdown(); };
+  bar.append(b);
+  return bar;
+}
+
+// 空白处 Fluent 右键菜单：结构与 Win11 资源管理器完全一致
+// （粘贴快捷条 + 查看/排序方式/刷新 + 撤消 + 新建 + 属性 + 扩展段 + 显示更多选项）
+async function showBackgroundMenu(x: number, y: number) {
   const tab = activeTab();
   const path = tab.listing?.parse_path;
   if (!path) return;
-  const r = await invoke<MenuResult>("show_context_menu", {
-    selection: [],
-    background: path,
-    state: { view: tab.view, sort_key: tab.sortKey, sort_asc: tab.sortAsc },
+  const token = ++ctxToken;
+  const virt = isVirtualLocation();
+
+  // 并行拉取：经典背景菜单树 + 新建模板 + 粘贴可用性（加载完成后一次性显示）
+  let tree: CtxNode[] = [];
+  let newEntries: NewMenuEntry[] = [];
+  let canPaste = false;
+  try {
+    [tree, newEntries, canPaste] = await Promise.all([
+      invoke<CtxNode[]>("get_ctx_menu", { selection: [], background: path }).catch(() => [] as CtxNode[]),
+      invoke<NewMenuEntry[]>("get_new_menu", { folder: path }).catch(() => [] as NewMenuEntry[]),
+      invoke<boolean>("clipboard_has_files").catch(() => false),
+    ]);
+  } catch (e) { console.error(e); }
+  // 期间又发起了新菜单：释放后端实例
+  if (token !== ctxToken) {
+    if (tree.length) void invoke("close_ctx_menu");
+    return;
+  }
+
+  const nodeToItem = (n: CtxNode): MenuItem => {
+    if (n.separator) return { separator: true };
+    const clickable = n.children.length === 0 && n.id >= 1 && n.id <= 0x7fff;
+    return {
+      label: n.label,
+      accel: n.accel || undefined,
+      iconImg: n.icon ?? undefined,
+      submenu: n.children.length ? n.children.map(nodeToItem) : undefined,
+      disabled: !clickable && n.children.length === 0,
+      onClick: clickable
+        ? () => {
+            ctxMenuOpen = false;
+            void invoke<MenuResult>("invoke_ctx_item", { id: n.id }).then((r) => handleMenuResult(r, []));
+          }
+        : undefined,
+    };
+  };
+
+  // 查看子菜单：8 种视图，圆点标记当前项（写回 ShellBag 由 setView 完成）
+  const vi = (view: ViewMode, label: string, glyph: string): MenuItem => ({
+    label, glyph, checked: tab.view === view, checkStyle: "dot", onClick: () => setView(view),
   });
-  handleMenuResult(r, []);
+  const viewSub: MenuItem[] = [
+    vi("xl-icons", "超大图标", "&#xE71D;"),
+    vi("l-icons", "大图标", "&#xE922;"),
+    vi("m-icons", "中图标", "&#xF0E2;"),
+    vi("s-icons", "小图标", "&#xE80A;"),
+    vi("list", "列表", "&#xEA37;"),
+    vi("details", "详细信息", "&#xE8FD;"),
+    vi("tiles", "平铺", "&#xE8A9;"),
+    vi("content", "内容", "&#xE8A4;"),
+  ];
+
+  // 排序方式子菜单：与命令栏"排序"菜单一致
+  const sortItem = (key: SortKey, label: string): MenuItem => ({
+    label, checked: tab.sortKey === key, checkStyle: "dot",
+    onClick: () => { tab.sortKey = key; renderHeader(); renderList(); },
+  });
+  const sortSub: MenuItem[] = [
+    sortItem("name", "名称"),
+    sortItem("date", "修改日期"),
+    sortItem("type", "类型"),
+    sortItem("size", "大小"),
+    { separator: true },
+    { label: "递增", checked: tab.sortAsc, checkStyle: "dot", onClick: () => { tab.sortAsc = true; renderHeader(); renderList(); } },
+    { label: "递减", checked: !tab.sortAsc, checkStyle: "dot", onClick: () => { tab.sortAsc = false; renderHeader(); renderList(); } },
+  ];
+
+  // 新建子菜单：ShellNew 模板（与命令栏"新建"菜单同源）；虚拟位置回退仅"文件夹"
+  let fileIdx = 0;
+  const newSub: MenuItem[] = newEntries.length
+    ? newEntries.map((e) => {
+        if (e.separator) return { separator: true } as MenuItem;
+        const i = fileIdx++;
+        return {
+          label: e.label,
+          iconImg: e.icon ?? undefined,
+          glyph: e.icon ? undefined : (i === 0 ? "&#xE8B7;" : "&#xE7C3;"),
+          onClick: () => {
+            void invoke("invoke_new_item", { id: e.id }).then(() => {
+              setTimeout(() => void refresh(), 500);
+              setTimeout(() => void refresh(), 1500);
+            });
+          },
+        } as MenuItem;
+      })
+    : [{ label: "文件夹", glyph: "&#xE8B7;", disabled: virt, onClick: () => void createNewFolder() }];
+
+  // 扩展段：背景树中的现代扩展（在终端中打开/Code 等白名单），其余收进"显示更多选项"
+  const ext: MenuItem[] = [];
+  for (const n of tree) {
+    if (n.separator) continue;
+    if (!isModernExt(n.label)) continue;
+    ext.push(nodeToItem(n));
+  }
+
+  // "显示更多选项"：完整经典背景菜单（头部与资源管理器一样补 查看/排序方式/刷新）
+  const moreSub: MenuItem[] = [
+    { label: "查看", submenu: viewSub },
+    { label: "排序方式", submenu: sortSub },
+    { label: "刷新", onClick: () => void refresh() },
+    { separator: true },
+    ...tree.map(nodeToItem),
+  ];
+
+  const items: MenuItem[] = [
+    { label: "查看", glyph: "&#xE890;", submenu: viewSub },
+    { label: "排序方式", glyph: "&#xE8CB;", submenu: sortSub },
+    { label: "刷新", glyph: "&#xE72C;", onClick: () => void refresh() },
+    { separator: true },
+  ];
+  // 有可撤消操作时才显示"撤消"（与 Win11 资源管理器一致）
+  const top = undoStack[undoStack.length - 1];
+  if (top) {
+    items.push({ label: `撤消${top.label}`, glyph: "&#xE7A7;", accel: "Ctrl+Z", onClick: () => void doUndo() });
+  }
+  items.push({ label: "新建", glyph: "&#xE710;", submenu: newSub });
+  items.push({ separator: true });
+  items.push({
+    label: "属性", glyph: "&#xE90F;", accel: "Alt+Enter",
+    onClick: () => void invoke("invoke_verb", { selection: [], background: path, verb: "properties" }),
+  });
+  if (ext.length) items.push({ separator: true }, ...ext);
+  if (tree.length) {
+    items.push({ separator: true }, { label: "显示更多选项", glyph: "&#xE712;", submenu: moreSub });
+  }
+
+  // 有可粘贴对象时才显示顶部快捷条（仅"粘贴"，靠左），否则整条隐藏
+  showCtxMenuAt(x, y, items, [], canPaste && !virt ? buildBgQuickbar() : null);
+  ctxUiOpen = true;
+  ctxMenuOpen = tree.length > 0;
 }
 
 function handleMenuResult(r: MenuResult, sel: string[]) {
@@ -2867,10 +3087,12 @@ function bindEvents() {
 /* ===================== 启动 ===================== */
 async function init() {
   bindEvents();
-  tabs.push(newTab(THIS_PC));
+  // "在新窗口中打开"新实例：启动参数带初始路径时直接定位
+  const start = await invoke<string | null>("get_start_path").catch(() => null) ?? THIS_PC;
+  tabs.push(newTab(start));
   activeTabIdx = 0;
   void invoke("init_drag_drop");
-  await Promise.all([navigate(THIS_PC, { push: false }), loadSidebar()]);
+  await Promise.all([navigate(start, { push: false }), loadSidebar()]);
 }
 
 void init();

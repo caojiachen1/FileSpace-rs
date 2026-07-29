@@ -109,10 +109,13 @@ pub async fn invoke_new_item(id: u32) -> bool {
     run_on_shell(move || shell_menu::invoke_new(id))
 }
 
-/// Fluent 右键菜单：获取完整经典菜单树
+/// Fluent 右键菜单：获取完整经典菜单树（selection 为空时取 background 背景菜单）
 #[tauri::command]
-pub async fn get_ctx_menu(selection: Vec<String>) -> Vec<shell_menu::CtxNode> {
-    run_on_shell(move || shell_menu::get_ctx_menu(selection))
+pub async fn get_ctx_menu(
+    selection: Vec<String>,
+    background: Option<String>,
+) -> Vec<shell_menu::CtxNode> {
+    run_on_shell(move || shell_menu::get_ctx_menu(selection, background))
 }
 
 #[tauri::command]
@@ -126,6 +129,39 @@ pub async fn close_ctx_menu() {
         shell_menu::close_ctx();
         crate::shell_modern::clear();
     })
+}
+
+/// 剪贴板是否有可粘贴的文件（背景菜单"粘贴"可用性）
+#[tauri::command]
+pub async fn clipboard_has_files() -> bool {
+    run_on_shell(shell_menu::clipboard_has_files)
+}
+
+/// 格式化驱动器（系统对话框，独立线程，不阻塞 shell 线程）
+#[tauri::command]
+pub async fn format_drive(letter: String) {
+    if let Some(c) = letter.chars().next() {
+        shell_menu::format_drive(c);
+    }
+}
+
+/// 在新窗口中打开：启动新实例并把目标路径作为启动参数
+#[tauri::command]
+pub async fn open_new_window(path: String) -> bool {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| std::process::Command::new(exe).arg(path).spawn().ok())
+        .is_some()
+}
+
+/// 启动参数中的初始路径（"在新窗口中打开"新实例用）
+#[tauri::command]
+pub async fn get_start_path() -> Option<String> {
+    let a = std::env::args().nth(1)?;
+    // 仅接受路径样式参数（盘符/UNC/Shell 命名空间）
+    let looks_like_path =
+        a.starts_with("\\\\") || a.starts_with("::") || a.as_bytes().get(1) == Some(&b':');
+    looks_like_path.then_some(a)
 }
 
 /// Win11 现代菜单扩展（Windows.FileExplorerContextMenus 契约 + IExplorerCommand）

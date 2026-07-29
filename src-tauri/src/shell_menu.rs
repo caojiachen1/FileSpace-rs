@@ -729,12 +729,20 @@ unsafe fn enum_menu_tree(menu_obj: &IContextMenu, hmenu: HMENU, depth: u32) -> V
     out
 }
 
-/// 获取选中项的完整经典菜单树（含第三方扩展/子菜单/图标），供前端 Fluent 风格渲染
-pub fn get_ctx_menu(selection: Vec<String>) -> Vec<CtxNode> {
+/// 获取完整经典菜单树（含第三方扩展/子菜单/图标），供前端 Fluent 风格渲染；
+/// selection 为空且提供 background 时返回文件夹空白处的背景菜单树
+pub fn get_ctx_menu(selection: Vec<String>, background: Option<String>) -> Vec<CtxNode> {
     clear_pending_ctx();
-    let menu_obj = match context_menu_for_items(&selection) {
-        Ok(m) => m,
-        Err(_) => return Vec::new(),
+    let menu_obj = if selection.is_empty() {
+        match background.as_deref().map(context_menu_for_background) {
+            Some(Ok(m)) => m,
+            _ => return Vec::new(),
+        }
+    } else {
+        match context_menu_for_items(&selection) {
+            Ok(m) => m,
+            Err(_) => return Vec::new(),
+        }
     };
     unsafe {
         let hmenu = match CreatePopupMenu() {
@@ -803,7 +811,41 @@ pub fn invoke_ctx(id: u32) -> MenuResult {
     }
 }
 
+/// 格式化驱动器：弹出系统格式化对话框（与资源管理器"格式化..."一致）。
+/// 对话框是模态消息循环，在独立线程运行，避免阻塞 shell 线程
+pub fn format_drive(letter: char) {
+    let idx = (letter.to_ascii_uppercase() as u8).wrapping_sub(b'A') as u32;
+    if idx >= 26 {
+        return;
+    }
+    std::thread::spawn(move || unsafe {
+        use windows::Win32::System::Com::{
+            CoInitializeEx, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE,
+        };
+        use windows::Win32::UI::Shell::{SHFormatDrive, SHFMT_ID_DEFAULT, SHFMT_OPT};
+        use windows::Win32::UI::WindowsAndMessaging::GetDesktopWindow;
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+        let _ = SHFormatDrive(GetDesktopWindow(), idx, SHFMT_ID_DEFAULT, SHFMT_OPT(0));
+    });
+}
+
 /// 前端菜单关闭未选择时释放挂起实例
 pub fn close_ctx() {
     clear_pending_ctx();
+}
+
+/// 剪贴板中是否有可粘贴的文件（背景菜单"粘贴"按钮可用性，与资源管理器一致）
+pub fn clipboard_has_files() -> bool {
+    use windows::core::w;
+    use windows::Win32::System::DataExchange::{
+        IsClipboardFormatAvailable, RegisterClipboardFormatW,
+    };
+    unsafe {
+        // CF_HDROP = 15
+        if IsClipboardFormatAvailable(15).is_ok() {
+            return true;
+        }
+        let idlist = RegisterClipboardFormatW(w!("Shell IDList Array"));
+        idlist != 0 && IsClipboardFormatAvailable(idlist).is_ok()
+    }
 }

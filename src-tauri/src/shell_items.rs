@@ -307,10 +307,19 @@ pub fn desktop_entries() -> Vec<ShellEntry> {
     }
 }
 
-/// 通过 GetParent 链构建面包屑（桌面根节点被剔除，与资源管理器一致）
+/// 通过 GetParent 链构建面包屑（桌面根节点被剔除，与资源管理器一致）。
+/// 盘符路径统一加"此电脑"前缀解析：部分卷直接解析会得到桌面直下的扁平 PIDL，
+/// 导致父级链缺少"此电脑"（如 F:/G: 盘，与 C:/D: 行为不一致）
 pub fn breadcrumb_for(path: &str) -> Vec<Crumb> {
+    let bytes = path.as_bytes();
+    let is_drive_path = bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':';
+    let item = if is_drive_path {
+        item_from_path(&format!("{THIS_PC}\\{path}")).or_else(|_| item_from_path(path))
+    } else {
+        item_from_path(path)
+    };
     let mut chain = Vec::new();
-    if let Ok(item) = item_from_path(path) {
+    if let Ok(item) = item {
         let mut cur: Option<IShellItem2> = Some(item);
         while let Some(it) = cur {
             let name = display_name(&it, SIGDN_NORMALDISPLAY).unwrap_or_default();
