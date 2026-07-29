@@ -139,6 +139,18 @@ pub async fn invoke_modern_item(mid: u32) -> bool {
     run_on_shell(move || crate::shell_modern::invoke_modern(mid))
 }
 
+/// 查询文件夹在 ShellBag 中保存的视图模式（与资源管理器共享）
+#[tauri::command]
+pub async fn get_view_mode(path: String) -> Option<String> {
+    run_on_shell(move || crate::shell_bags::view_mode_for(&path))
+}
+
+/// 将视图模式写回 ShellBag（资源管理器可见）
+#[tauri::command]
+pub async fn set_view_mode(path: String, view: String) -> bool {
+    run_on_shell(move || crate::shell_bags::save_view_mode(&path, &view))
+}
+
 /// 图片分辨率（详细信息窗格用）
 #[tauri::command]
 pub async fn get_image_size(path: String) -> Option<(u32, u32)> {

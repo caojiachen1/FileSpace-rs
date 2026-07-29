@@ -163,6 +163,8 @@ async function navigate(path: string, opts: { push?: boolean; selectPath?: strin
   pendingPath = path;
   const cached = listingCache.get(path);
   let pushed = false;
+  // 并行查询 ShellBag 中保存的视图模式（与资源管理器共享，无记录时保持当前视图）
+  const viewPromise = invoke<string | null>("get_view_mode", { path }).catch(() => null);
 
   // 向上返回时选中来源文件夹并滚动到可见（与资源管理器一致）
   const applySelect = () => {
@@ -194,15 +196,28 @@ async function navigate(path: string, opts: { push?: boolean; selectPath?: strin
     }
     renderAll();
     applySelect();
+    // 缓存已先行渲染，ShellBag 视图到达后若不同再局部重绘
+    void viewPromise.then((v) => {
+      if (token === navToken && v && tab.view !== v) {
+        tab.view = v as ViewMode;
+        renderHeader();
+        renderList();
+        renderViewButtons();
+      }
+    });
   } else {
     // 立即反馈：侧栏选中高亮切换 + 列表显示加载提示
     renderSidebar();
     $("list-body").innerHTML = '<div class="empty-hint">正在处理它...</div>';
   }
   try {
-    const listing = await invoke<FolderListing>("list_folder", { path });
+    const [listing, savedView] = await Promise.all([
+      invoke<FolderListing>("list_folder", { path }),
+      viewPromise,
+    ]);
     // 期间又发起了新导航，丢弃旧结果
     if (token !== navToken) return false;
+    if (savedView) tab.view = savedView as ViewMode;
     pendingPath = null;
     cacheListing(path, listing);
     tab.listing = listing;
@@ -1842,10 +1857,14 @@ function showSortMenu(anchor: HTMLElement) {
 }
 
 function setView(view: ViewMode) {
-  activeTab().view = view;
+  const tab = activeTab();
+  tab.view = view;
   renderHeader();
   renderList();
   renderViewButtons();
+  // 写回 ShellBag，与资源管理器共享该文件夹的视图设置
+  const p = tab.listing?.parse_path ?? tab.history[tab.historyIndex];
+  if (p) void invoke("set_view_mode", { path: p, view });
 }
 
 function renderViewButtons() {
