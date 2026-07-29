@@ -746,7 +746,7 @@ function sideItem(entry: ShellEntry, opts: { pin?: boolean; indent?: number; exp
   if (entry.fs_path) el.dataset.dropFs = entry.fs_path;
   el.dataset.dropName = entry.name;
   el.onmousedown = (ev) => {
-    if (ev.button !== 0 || (ev.target as HTMLElement).closest(".side-expander")) return;
+    if (ev.button !== 0 || (ev.target as HTMLElement).closest(".side-expander, .rename-input")) return;
     beginDragWatch(ev, () => [entry.parse_path]);
   };
   el.onclick = () => {
@@ -1046,6 +1046,8 @@ function bindItemEvents(el: HTMLElement, e: ShellEntry, idx: number, tab: Tab) {
   if (cutPaths.has(e.parse_path)) el.classList.add("cut");
   el.onmousedown = (ev) => {
     if (ev.button !== 0) return;
+    // 重命名输入框内：不拢选不拖拽，交给输入框自行处理文字选择
+    if ((ev.target as HTMLElement).closest(".rename-input")) return;
     // Explorer 语义：mousedown 即选中未选中项；已选中项保持多选以便整体拖拽
     if (!tab.selection.has(e.parse_path) && !ev.ctrlKey && !ev.shiftKey) {
       selectRow(idx, e, ev);
