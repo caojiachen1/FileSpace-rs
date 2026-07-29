@@ -1044,10 +1044,13 @@ function bindItemEvents(el: HTMLElement, e: ShellEntry, idx: number, tab: Tab) {
   el.dataset.dropName = e.name;
   if (tab.selection.has(e.parse_path)) el.classList.add("selected");
   if (cutPaths.has(e.parse_path)) el.classList.add("cut");
+  // 按下前是否已是唯一选中项（"再次单击名称进入重命名"判定，与资源管理器一致）
+  let preSelected = false;
   el.onmousedown = (ev) => {
     if (ev.button !== 0) return;
     // 重命名输入框内：不拢选不拖拽，交给输入框自行处理文字选择
     if ((ev.target as HTMLElement).closest(".rename-input")) return;
+    preSelected = tab.selection.size === 1 && tab.selection.has(e.parse_path);
     // Explorer 语义：mousedown 即选中未选中项；已选中项保持多选以便整体拖拽
     if (!tab.selection.has(e.parse_path) && !ev.ctrlKey && !ev.shiftKey) {
       selectRow(idx, e, ev);
@@ -1059,13 +1062,24 @@ function bindItemEvents(el: HTMLElement, e: ShellEntry, idx: number, tab: Tab) {
   };
   el.onclick = (ev) => {
     ev.stopPropagation();
+    if ((ev.target as HTMLElement).closest(".rename-input")) return;
     if (consumeDragClickSuppress()) return;
+    window.clearTimeout(renameTimer);
+    // 已选中项上再次单击名称（非双击/无修饰键）：延时进入重命名，与资源管理器一致
+    const armRename = preSelected && ev.detail === 1 && !ev.ctrlKey && !ev.shiftKey
+      && isNameTarget(ev.target as HTMLElement);
     selectRow(idx, e, ev);
+    if (armRename) renameTimer = window.setTimeout(() => beginItemRename(e), 500);
   };
-  el.ondblclick = () => void openEntry(e);
+  el.ondblclick = () => {
+    // 双击：取消待触发的单击重命名，执行打开
+    window.clearTimeout(renameTimer);
+    void openEntry(e);
+  };
   el.oncontextmenu = (ev) => {
     ev.preventDefault();
     ev.stopPropagation();
+    window.clearTimeout(renameTimer);
     if (!tab.selection.has(e.parse_path)) {
       tab.selection = new Set([e.parse_path]);
       tab.anchorIndex = idx;
@@ -1074,6 +1088,24 @@ function bindItemEvents(el: HTMLElement, e: ShellEntry, idx: number, tab: Tab) {
     }
     void showItemMenu(ev.clientX, ev.clientY);
   };
+}
+
+// "选中后再次单击重命名"延时器（500ms，与系统双击间隔一致）
+let renameTimer: number | undefined;
+
+// 单击目标是否为名称文字（各视图的名称元素；资源管理器仅点名称才触发重命名）
+const isNameTarget = (t: HTMLElement) =>
+  t.matches(".grid-name, .list-name, .tile-name, .content-name, .drive-name") ||
+  (t.tagName === "SPAN" && !!t.closest(".cell-name"));
+
+// 触发单击重命名：磁盘卡片改卷标，文件系统项通用重命名；触发前重验选中状态
+function beginItemRename(e: ShellEntry) {
+  const t = activeTab();
+  if (!(t.selection.size === 1 && t.selection.has(e.parse_path))) return;
+  if (document.querySelector(".rename-input")) return; // 已在重命名中
+  if (/^[A-Za-z]:\\$/.test(e.parse_path)) { startDriveRename(e); return; }
+  if (!e.fs_path) return; // 虚拟项不支持重命名
+  startRename();
 }
 
 /* -------- 原生拖拽：源启动（4px 阈值，与资源管理器一致） -------- */
@@ -2820,11 +2852,14 @@ function startRename() {
   const sel = [...tab.selection];
   if (sel.length !== 1) return;
   const path = sel[0];
-  const row = document.querySelector<HTMLElement>(`.row[data-path="${CSS.escape(path)}"]`);
+  // 支持所有视图：找到项目元素及其名称元素（详细信息/图标/列表/平铺/内容）
+  const row = document.querySelector<HTMLElement>(`#list-body [data-path="${CSS.escape(path)}"]`);
   const entry = tab.listing?.entries.find((e) => e.parse_path === path);
   if (!row || !entry) return;
-  const nameCell = row.querySelector(".cell-name")!;
-  const nameSpan = nameCell.querySelector("span")!;
+  const nameSpan = row.querySelector<HTMLElement>(
+    ".cell-name span, .grid-name, .list-name, .tile-name, .content-name",
+  );
+  if (!nameSpan) return;
   const input = document.createElement("input");
   input.className = "rename-input";
   input.value = entry.name;
