@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod commands;
+mod drag_drop;
 mod shell_icons;
 mod shell_items;
 mod shell_menu;
@@ -40,6 +41,9 @@ fn main() {
             commands::invoke_modern_item,
             commands::get_image_size,
             commands::get_item_details,
+            commands::init_drag_drop,
+            commands::start_drag,
+            commands::update_drop_target,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

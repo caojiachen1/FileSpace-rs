@@ -150,3 +150,27 @@ pub async fn get_image_size(path: String) -> Option<(u32, u32)> {
 pub async fn get_item_details(path: String) -> Vec<(String, String)> {
     run_on_shell(move || shell_items::item_details(&path))
 }
+
+// ---- 原生拖拽：以下命令刻意不走 run_on_shell ----
+// DoDragDrop 模态循环在主线程运行，拖拽期间 shell 线程需保持空闲响应其他命令；
+// update_drop_target 在拖拽中高频调用，走 run_on_shell 会排队甚至死锁。
+
+#[tauri::command]
+pub async fn init_drag_drop(app: tauri::AppHandle) {
+    crate::drag_drop::init(&app);
+}
+
+#[tauri::command]
+pub async fn start_drag(app: tauri::AppHandle, paths: Vec<String>) {
+    crate::drag_drop::start_drag(app, paths);
+}
+
+#[tauri::command]
+pub async fn update_drop_target(
+    kind: String,
+    parse_path: String,
+    fs_path: Option<String>,
+    name: String,
+) {
+    crate::drag_drop::update_drop_target(kind, parse_path, fs_path, name);
+}

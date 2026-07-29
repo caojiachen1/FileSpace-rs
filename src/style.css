@@ -18,7 +18,7 @@
   --divider: rgb(43, 43, 43);
 }
 
-* { margin: 0; padding: 0; box-sizing: border-box; user-select: none; }
+* { margin: 0; padding: 0; box-sizing: border-box; user-select: none; -webkit-user-drag: none; }
 html, body { height: 100%; overflow: hidden; }
 body {
   font-family: "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", sans-serif;
@@ -685,3 +685,27 @@ body.compact .tile-item { padding: 4px 10px; }
 ::-webkit-scrollbar-thumb:hover { background: #6a6a6a; background-clip: padding-box; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-corner { background: transparent; }
+
+/* ===== 原生拖拽：drop 目标高亮（与资源管理器一致） ===== */
+.row.drop-target, .grid-item.drop-target, .list-item.drop-target,
+.tile-item.drop-target, .content-row.drop-target, .drive-card.drop-target {
+  background: var(--bg-selected);
+  outline: 1px solid var(--accent-btn);
+  outline-offset: -1px;
+}
+.side-item.drop-target, .crumb.drop-target {
+  background: var(--bg-selected);
+  outline: 1px solid var(--accent-btn);
+  outline-offset: -1px;
+  border-radius: 4px;
+}
+#list-body.drop-target {
+  outline: 2px solid var(--accent-btn);
+  outline-offset: -2px;
+}
+#qa-zone.drop-target {
+  outline: 1px dashed var(--accent-btn);
+  outline-offset: -1px;
+  border-radius: 4px;
+}
+

@@ -403,6 +403,138 @@ function setupMarquee() {
   });
 }
 
+/* -------- 原生拖拽：drop 目标命中测试与高亮（与资源管理器一致） -------- */
+function setupNativeDnD() {
+  interface Target { kind: string; path: string; fs: string | null; name: string; el: HTMLElement | null }
+  let cur: Target | null = null;
+  let curKey = "";
+  let springEl: HTMLElement | null = null;
+  let springTimer = 0;
+
+  const clearSpring = () => {
+    clearTimeout(springTimer);
+    springTimer = 0;
+    springEl = null;
+  };
+  const clearHighlight = () => {
+    cur?.el?.classList.remove("drop-target");
+    cur = null;
+    curKey = "";
+    clearSpring();
+  };
+  const report = (t: Target | null) => {
+    const key = t ? `${t.kind}|${t.path}` : "none";
+    if (key === curKey) return;
+    cur?.el?.classList.remove("drop-target");
+    cur = t;
+    curKey = key;
+    // 拖拽源自身不高亮（后端也会判定为禁止）
+    const isSelf = t?.kind === "item" && draggingPaths.includes(t.path);
+    if (!isSelf) t?.el?.classList.add("drop-target");
+    void invoke("update_drop_target", {
+      kind: t?.kind ?? "none",
+      parsePath: t?.path ?? "",
+      fsPath: t?.fs ?? null,
+      name: t?.name ?? "",
+    });
+    // spring-load：悬停带折叠箭头的侧栏项 ≥800ms 自动展开
+    clearSpring();
+    if (t?.el?.classList.contains("side-item")) {
+      const exp = t.el.querySelector<HTMLElement>(".side-expander");
+      if (exp && exp.innerHTML.length > 0 && exp.textContent !== "\uE70D") {
+        springEl = t.el;
+        springTimer = window.setTimeout(() => {
+          if (springEl && curKey === key) exp.click();
+        }, 800);
+      }
+    }
+  };
+
+  // 虚拟命名空间根（此电脑/网络/快速访问根等）不可作为放置目标
+  const isVirtualPath = (p: string) => p === "" || p.startsWith("::") || p.startsWith("shell:");
+
+  const hitTest = (px: number, py: number): Target | null => {
+    const x = px / devicePixelRatio;
+    const y = py / devicePixelRatio;
+    const el = document.elementFromPoint(x, y) as HTMLElement | null;
+    if (!el) return null;
+
+    // 1. 列表中的文件夹项（含此电脑驱动器卡片）
+    const item = el.closest<HTMLElement>(ITEM_SELECTOR);
+    if (item?.dataset.path && item.dataset.folder) {
+      return { kind: "item", path: item.dataset.path, fs: item.dataset.fs ?? null, name: item.dataset.dropName ?? "", el: item };
+    }
+
+    // 2. 侧栏项（快速访问/驱动器/树节点）
+    const side = el.closest<HTMLElement>(".side-item");
+    if (side?.dataset.dropPath) {
+      // 快速访问区内：项的上下边缘 → 固定到快速访问（与资源管理器插入行为一致）
+      if (side.closest("#qa-zone")) {
+        const r = side.getBoundingClientRect();
+        if (y < r.top + r.height * 0.25 || y > r.bottom - r.height * 0.25) {
+          return { kind: "pin", path: "", fs: null, name: "快速访问", el: $("qa-zone") };
+        }
+      }
+      const p = side.dataset.dropPath;
+      if (!isVirtualPath(p) || side.dataset.dropFs) {
+        return { kind: "item", path: p, fs: side.dataset.dropFs ?? null, name: side.dataset.dropName ?? "", el: side };
+      }
+      return null;
+    }
+
+    // 3. 快速访问区空白 → 固定到快速访问
+    const qa = el.closest<HTMLElement>("#qa-zone");
+    if (qa) return { kind: "pin", path: "", fs: null, name: "快速访问", el: qa };
+
+    // 4. 面包屑段
+    const crumb = el.closest<HTMLElement>(".crumb");
+    if (crumb?.dataset.dropPath && !isVirtualPath(crumb.dataset.dropPath)) {
+      const p = crumb.dataset.dropPath;
+      const fs = /^[a-zA-Z]:[\\/]|^\\\\/.test(p) ? p : null;
+      return { kind: "item", path: p, fs, name: crumb.dataset.dropName ?? "", el: crumb };
+    }
+
+    // 5. 列表空白 → 当前文件夹背景
+    const body = el.closest<HTMLElement>("#list-body");
+    if (body) {
+      const listing = activeTab().listing;
+      if (listing && !isVirtualPath(listing.parse_path)) {
+        const fs = /^[a-zA-Z]:[\\/]|^\\\\/.test(listing.parse_path) ? listing.parse_path : null;
+        return { kind: "background", path: listing.parse_path, fs, name: listing.folder_name, el: body };
+      }
+    }
+    return null;
+  };
+
+  const autoScroll = (py: number) => {
+    const body = $("list-body");
+    const r = body.getBoundingClientRect();
+    const y = py / devicePixelRatio;
+    if (y > r.bottom - 24 && y < r.bottom + 4) body.scrollTop += Math.min(24, y - r.bottom + 24);
+    else if (y < r.top + 24 && y > r.top - 4) body.scrollTop -= Math.min(24, r.top + 24 - y);
+  };
+
+  void listen<{ x: number; y: number }>("fs-drag-enter", ({ payload }) => {
+    report(hitTest(payload.x, payload.y));
+  });
+  void listen<{ x: number; y: number }>("fs-drag-over", ({ payload }) => {
+    autoScroll(payload.y);
+    report(hitTest(payload.x, payload.y));
+  });
+  void listen("fs-drag-leave", () => clearHighlight());
+  void listen("fs-drag-drop", () => {
+    clearHighlight();
+    dragSuppressClickUntil = performance.now() + 400;
+  });
+  void listen("fs-drag-finished", () => {
+    clearHighlight();
+    draggingPaths = [];
+    dragSuppressClickUntil = performance.now() + 400;
+  });
+  // 拖拽固定到快速访问完成 → 刷新侧栏
+  void listen("fs-quick-access-changed", () => void loadSidebar());
+}
+
 // 缩略图批量加载（中/大/超大图标视图与预览窗格）
 async function loadThumbs(entries: ShellEntry[], targets: () => Map<string, HTMLImageElement>, size: number) {
   const missing = entries.filter((e) => !iconCache.has(`t${size}|${e.parse_path}`));
@@ -551,6 +683,8 @@ function renderBreadcrumb() {
     const el = document.createElement("div");
     el.className = "crumb";
     el.textContent = c.name;
+    el.dataset.dropPath = c.parse_path;
+    el.dataset.dropName = c.name;
     el.onclick = (ev) => {
       ev.stopPropagation();
       // 点面包屑回到祖先目录也选中沿路径的子级
@@ -593,7 +727,17 @@ function sideItem(entry: ShellEntry, opts: { pin?: boolean; indent?: number; exp
     pin.innerHTML = "&#xE718;";
     el.append(pin);
   }
-  el.onclick = () => void navigate(entry.parse_path);
+  el.dataset.dropPath = entry.parse_path;
+  if (entry.fs_path) el.dataset.dropFs = entry.fs_path;
+  el.dataset.dropName = entry.name;
+  el.onmousedown = (ev) => {
+    if (ev.button !== 0 || (ev.target as HTMLElement).closest(".side-expander")) return;
+    beginDragWatch(ev, () => [entry.parse_path]);
+  };
+  el.onclick = () => {
+    if (consumeDragClickSuppress()) return;
+    void navigate(entry.parse_path);
+  };
   el.oncontextmenu = (ev) => {
     ev.preventDefault();
     ev.stopPropagation();
@@ -661,9 +805,12 @@ function renderSidebar() {
   sb.innerHTML = "";
   if (!sidebar) return;
 
+  const qaZone = document.createElement("div");
+  qaZone.id = "qa-zone";
   for (const qa of sidebar.quick_access) {
-    sb.append(sideItem(qa, { pin: qa.pinned, expander: "none" }));
+    qaZone.append(sideItem(qa, { pin: qa.pinned, expander: "none" }));
   }
+  sb.append(qaZone);
   const div = document.createElement("div");
   div.className = "side-divider";
   sb.append(div);
@@ -877,9 +1024,27 @@ function renderList() {
 // 公共：选中/双击/右键/剪切态 绑定
 function bindItemEvents(el: HTMLElement, e: ShellEntry, idx: number, tab: Tab) {
   el.dataset.path = e.parse_path;
+  if (e.is_folder) el.dataset.folder = "1";
+  if (e.fs_path) el.dataset.fs = e.fs_path;
+  el.dataset.dropName = e.name;
   if (tab.selection.has(e.parse_path)) el.classList.add("selected");
   if (cutPaths.has(e.parse_path)) el.classList.add("cut");
-  el.onclick = (ev) => { ev.stopPropagation(); selectRow(idx, e, ev); };
+  el.onmousedown = (ev) => {
+    if (ev.button !== 0) return;
+    // Explorer 语义：mousedown 即选中未选中项；已选中项保持多选以便整体拖拽
+    if (!tab.selection.has(e.parse_path) && !ev.ctrlKey && !ev.shiftKey) {
+      selectRow(idx, e, ev);
+    }
+    beginDragWatch(ev, () => {
+      const t = activeTab();
+      return t.selection.has(e.parse_path) ? [...t.selection] : [e.parse_path];
+    });
+  };
+  el.onclick = (ev) => {
+    ev.stopPropagation();
+    if (consumeDragClickSuppress()) return;
+    selectRow(idx, e, ev);
+  };
   el.ondblclick = () => void openEntry(e);
   el.oncontextmenu = (ev) => {
     ev.preventDefault();
@@ -892,6 +1057,32 @@ function bindItemEvents(el: HTMLElement, e: ShellEntry, idx: number, tab: Tab) {
     }
     void showItemMenu(ev.clientX, ev.clientY);
   };
+}
+
+/* -------- 原生拖拽：源启动（4px 阈值，与资源管理器一致） -------- */
+let dragSuppressClickUntil = 0;
+let draggingPaths: string[] = [];
+function consumeDragClickSuppress(): boolean {
+  return performance.now() < dragSuppressClickUntil;
+}
+
+function beginDragWatch(ev: MouseEvent, getPaths: () => string[]) {
+  const sx = ev.screenX, sy = ev.screenY;
+  const move = (mv: MouseEvent) => {
+    if (Math.abs(mv.screenX - sx) < 4 && Math.abs(mv.screenY - sy) < 4) return;
+    cleanup();
+    const paths = getPaths().filter(Boolean);
+    if (paths.length === 0) return;
+    dragSuppressClickUntil = performance.now() + 600;
+    draggingPaths = paths;
+    void invoke("start_drag", { paths });
+  };
+  const cleanup = () => {
+    document.removeEventListener("mousemove", move);
+    document.removeEventListener("mouseup", cleanup);
+  };
+  document.addEventListener("mousemove", move);
+  document.addEventListener("mouseup", cleanup);
 }
 
 // 公共：项目复选框
@@ -2637,6 +2828,12 @@ function bindEvents() {
   // 鼠标框选
   setupMarquee();
 
+  // 原生拖拽（drop 目标命中测试与高亮）
+  setupNativeDnD();
+
+  // 压制 Chromium 对 <img> 等元素的自发 HTML5 拖拽（与原生 OLE 拖拽冲突）
+  document.addEventListener("dragstart", (ev) => ev.preventDefault());
+
   // 目录变更自动刷新（防抖）
   let fsTimer: number | undefined;
   void listen("fs-changed", () => {
@@ -2653,6 +2850,7 @@ async function init() {
   bindEvents();
   tabs.push(newTab(THIS_PC));
   activeTabIdx = 0;
+  void invoke("init_drag_drop");
   await Promise.all([navigate(THIS_PC, { push: false }), loadSidebar()]);
 }
 
