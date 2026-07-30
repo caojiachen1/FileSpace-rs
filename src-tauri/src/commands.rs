@@ -98,6 +98,24 @@ pub async fn system_action(action: String) -> bool {
     run_on_shell(move || shell_menu::system_action(&action))
 }
 
+/// 压缩为 ZIP 文件（选中项，资源管理器同款 IExplorerCommand）
+#[tauri::command]
+pub async fn compress_to_zip(selection: Vec<String>) -> bool {
+    run_on_shell(move || shell_menu::compress_to_zip(selection))
+}
+
+/// 添加到收藏夹（选中文件，资源管理器同款 IExplorerCommand）
+#[tauri::command]
+pub async fn add_to_favorites(selection: Vec<String>) -> bool {
+    run_on_shell(move || shell_menu::add_to_favorites(selection))
+}
+
+/// 写入系统剪贴板（后端 Win32，避免前端 clipboard API 在非安全上下文下失效）
+#[tauri::command]
+pub async fn set_clipboard_text(text: String) -> bool {
+    run_on_shell(move || shell_menu::set_clipboard_text(&text))
+}
+
 /// 获取"新建"菜单（ShellNew 模板列表，含图标）
 #[tauri::command]
 pub async fn get_new_menu(folder: String) -> Vec<shell_menu::NewMenuEntry> {
@@ -218,6 +236,18 @@ pub async fn init_snap_layout(app: tauri::AppHandle) {
 #[tauri::command]
 pub async fn set_max_button_rect(x: i32, y: i32, w: i32, h: i32) {
     crate::snap_layout::set_rect(x, y, w, h);
+}
+
+/// 前端上报最大化状态（驱动顶边条显隐：最大化时屏蔽 WebView2 的边缘 resize 带）
+#[tauri::command]
+pub async fn set_window_maximized(maximized: bool) {
+    crate::snap_layout::set_maximized(maximized);
+}
+
+/// 前端上报最小化/关闭按钮水平范围（顶边条分段命中：角落可直接点到关闭）
+#[tauri::command]
+pub async fn set_caption_rects(min_x: i32, min_w: i32, close_x: i32, close_w: i32) {
+    crate::snap_layout::set_caption_rects(min_x, min_w, close_x, close_w);
 }
 
 #[tauri::command]

@@ -86,8 +86,9 @@ body {
 }
 .win-btn .fluent { font-size: 10px; }
 .win-btn:hover { background: var(--bg-hover); }
-/* Snap Layout 命中测试接管后，最大化按钮的 hover 由后端事件驱动 */
+/* Snap Layout 命中测试接管后，窗口控制按钮的 hover 由后端事件驱动 */
 .win-btn.nc-hover { background: var(--bg-hover); }
+.win-close.nc-hover { background: #c42b1c; }
 .win-close:hover { background: #c42b1c; }
 
 /* ===== 导航栏 ===== */

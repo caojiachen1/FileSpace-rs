@@ -457,10 +457,129 @@ pub fn new_folder(parent: &str, name: &str) -> Result<(), String> {
     }
 }
 
-/// "更多"菜单里的系统动作（白名单）：映射/断开网络驱动器、添加网络位置、文件夹选项
+/// 压缩为 ZIP 文件：资源管理器同款 IExplorerCommand（Windows.CompressTo.Zip），
+/// 对选中项生成同目录 zip（与右键"压缩为 ZIP 文件"一致）
+pub fn compress_to_zip(selection: Vec<String>) -> bool {
+    use windows::Win32::System::Com::{CoCreateInstance, IBindCtx, CLSCTX_ALL};
+    use windows::Win32::UI::Shell::IExplorerCommand;
+    const CLSID_COMPRESS_ZIP: windows::core::GUID =
+        windows::core::GUID::from_u128(0x9c07355e_c50a_45d2_b4a3_0a8235f8047f);
+    let Ok(array) = selection_array(&selection) else {
+        return false;
+    };
+    unsafe {
+        match CoCreateInstance::<_, IExplorerCommand>(&CLSID_COMPRESS_ZIP, None, CLSCTX_ALL) {
+            Ok(cmd) => cmd.Invoke(&array, None::<&IBindCtx>).is_ok(),
+            Err(_) => false,
+        }
+    }
+}
+
+/// 将文本写入系统剪贴板（CF_UNICODETEXT）。前端 navigator.clipboard 在
+/// Tauri webview 非安全上下文下不可靠，改走后端 Win32 确保生效。须在 STA 线程调用
+pub fn set_clipboard_text(text: &str) -> bool {
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::DataExchange::{
+        CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
+    };
+    use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+    const CF_UNICODETEXT: u32 = 13;
+    let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+    unsafe {
+        if OpenClipboard(Some(helper_hwnd())).is_err() {
+            return false;
+        }
+        let _ = EmptyClipboard();
+        let bytes = wide.len() * std::mem::size_of::<u16>();
+        let ok = match GlobalAlloc(GMEM_MOVEABLE, bytes) {
+            Ok(hglobal) => {
+                let ptr = GlobalLock(hglobal) as *mut u16;
+                if ptr.is_null() {
+                    false
+                } else {
+                    std::ptr::copy_nonoverlapping(wide.as_ptr(), ptr, wide.len());
+                    let _ = GlobalUnlock(hglobal);
+                    // SetClipboardData 成功后剪贴板接管 hglobal，不再手动释放
+                    SetClipboardData(CF_UNICODETEXT, Some(HANDLE(hglobal.0))).is_ok()
+                }
+            }
+            Err(_) => false,
+        };
+        let _ = CloseClipboard();
+        ok
+    }
+}
+
+/// 添加到收藏夹：资源管理器同款 IExplorerCommand（Windows.AddToFavorites，文件专用）
+pub fn add_to_favorites(selection: Vec<String>) -> bool {
+    use windows::Win32::System::Com::{CoCreateInstance, IBindCtx, CLSCTX_ALL};
+    use windows::Win32::UI::Shell::IExplorerCommand;
+    const CLSID_ADD_FAVORITES: windows::core::GUID =
+        windows::core::GUID::from_u128(0x323ca680_c24d_4099_b94d_446dd2d7249e);
+    let Ok(array) = selection_array(&selection) else {
+        return false;
+    };
+    unsafe {
+        match CoCreateInstance::<_, IExplorerCommand>(&CLSID_ADD_FAVORITES, None, CLSCTX_ALL) {
+            Ok(cmd) => cmd.Invoke(&array, None::<&IBindCtx>).is_ok(),
+            Err(_) => false,
+        }
+    }
+}
+
+/// "更多"菜单里的系统动作（白名单）：映射/断开网络驱动器、添加网络位置、文件夹选项、
+/// 磁盘清理/优化驱动器、连接到媒体服务器
 pub fn system_action(action: &str) -> bool {
-    use windows::Win32::UI::Shell::ShellExecuteW;
     use windows::core::w;
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    // 磁盘清理：cleanmgr（"clean-drive:C" 指定盘符；无盘符时弹系统选盘对话框）
+    if let Some(rest) = action.strip_prefix("clean-drive") {
+        let args: Option<Vec<u16>> = rest
+            .strip_prefix(':')
+            .map(|l| crate::shell_items::to_wide(&format!("/d {l}:")));
+        unsafe {
+            let h = ShellExecuteW(
+                None,
+                w!("open"),
+                w!("cleanmgr.exe"),
+                args.as_ref().map_or(PCWSTR::null(), |a| PCWSTR(a.as_ptr())),
+                PCWSTR::null(),
+                SW_SHOWNORMAL,
+            );
+            return h.0 as usize > 32;
+        }
+    }
+    // 优化驱动器：系统"碎片整理和优化驱动器"对话框（与资源管理器 Windows.Defragment 一致）
+    if action == "optimize-drives" {
+        unsafe {
+            let h = ShellExecuteW(
+                None,
+                w!("open"),
+                w!("dfrgui.exe"),
+                PCWSTR::null(),
+                PCWSTR::null(),
+                SW_SHOWNORMAL,
+            );
+            return h.0 as usize > 32;
+        }
+    }
+    // 连接到媒体服务器：资源管理器同款 IExplorerCommand（CommandStore Windows.AddMediaServer）
+    if action == "add-media-server" {
+        use windows::Win32::System::Com::{CoCreateInstance, IBindCtx, CLSCTX_ALL};
+        use windows::Win32::UI::Shell::IExplorerCommand;
+        const CLSID_ADD_MEDIA_SERVER: windows::core::GUID =
+            windows::core::GUID::from_u128(0xd7bfd8f3_678c_4827_b84b_0e5fc6d15be3);
+        unsafe {
+            if let Ok(cmd) =
+                CoCreateInstance::<_, IExplorerCommand>(&CLSID_ADD_MEDIA_SERVER, None, CLSCTX_ALL)
+            {
+                return cmd
+                    .Invoke(None::<&IShellItemArray>, None::<&IBindCtx>)
+                    .is_ok();
+            }
+        }
+        return false;
+    }
     let params: PCWSTR = match action {
         "map-drive" => w!("shell32.dll,SHHelpShortcuts_RunDLL Connect"),
         "disconnect-drive" => w!("shell32.dll,SHHelpShortcuts_RunDLL Disconnect"),

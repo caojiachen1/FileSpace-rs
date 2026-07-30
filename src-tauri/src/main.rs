@@ -34,6 +34,9 @@ fn main() {
             commands::create_folder,
             commands::watch_folder,
             commands::system_action,
+            commands::compress_to_zip,
+            commands::add_to_favorites,
+            commands::set_clipboard_text,
             commands::get_new_menu,
             commands::invoke_new_item,
             commands::get_ctx_menu,
@@ -52,6 +55,8 @@ fn main() {
             commands::init_drag_drop,
             commands::init_snap_layout,
             commands::set_max_button_rect,
+            commands::set_window_maximized,
+            commands::set_caption_rects,
             commands::start_drag,
             commands::update_drop_target,
         ])

@@ -2067,7 +2067,26 @@ function showProperties() {
   }
 }
 
+// 驱动器工具组（清理/优化/格式化）：此电脑与磁盘根目录的"更多"菜单共用
+function driveToolItems(drive: string | null): MenuItem[] {
+  return [
+    {
+      label: "清理", glyph: "&#xEA99;", accent: true,
+      onClick: () => void invoke("system_action", { action: drive ? `clean-drive:${drive}` : "clean-drive" }),
+    },
+    {
+      label: "优化", glyph: "&#xEC4A;", accent: true,
+      onClick: () => void invoke("system_action", { action: "optimize-drives" }),
+    },
+    {
+      label: "格式化", glyph: "&#xE977;", accent: true, disabled: !drive,
+      onClick: () => void invoke("format_drive", { letter: drive }),
+    },
+  ];
+}
+
 function showMoreMenu(anchor: HTMLElement) {
+  const tab = activeTab();
   const items: MenuItem[] = [];
   // 有可撤消操作时才显示"撤消"（与需求一致）
   const top = undoStack[undoStack.length - 1];
@@ -2077,24 +2096,88 @@ function showMoreMenu(anchor: HTMLElement) {
       { separator: true },
     );
   }
+  // 此电脑视图：驱动器工具组（清理/优化/格式化，与资源管理器一致）
+  const cur = tab.listing?.parse_path ?? "";
+  const isDriveRoot = /^[A-Za-z]:\\$/.test(cur);
+  // 固定到快速访问（磁盘根/普通文件夹/选中项共用）
+  const pinItem = (path: string): MenuItem => ({
+    label: "固定到快速访问", glyph: "&#xE718;", accent: true,
+    onClick: () => {
+      void invoke("invoke_verb", { selection: [path], background: null, verb: "pintohome" }).then(() => void loadSidebar());
+    },
+  });
+  // 选中了真实文件系统项（非虚拟位置，非此电脑磁盘列表）：压缩 ZIP / 固定 / 复制路径
+  const sel = [...tab.selection];
+  const hasFsSelection = cur !== THIS_PC && sel.length > 0
+    && sel.every((p) => !p.startsWith("::") && !p.startsWith("shell:"));
+  if (hasFsSelection) {
+    // 选中均为文件 → 添加到收藏夹；含文件夹 → 固定到快速访问（与资源管理器一致）
+    const selEntries = sel
+      .map((p) => tab.listing?.entries.find((e) => e.parse_path === p))
+      .filter((e): e is ShellEntry => !!e);
+    const allFiles = selEntries.length > 0 && selEntries.every((e) => !e.is_folder);
+    const pinOrFav: MenuItem = allFiles
+      ? {
+          label: "添加到收藏夹", glyph: "&#xE734;", accent: true,
+          onClick: () => void invoke("add_to_favorites", { selection: sel }).then(() => void loadSidebar()),
+        }
+      : {
+          label: "固定到快速访问", glyph: "&#xE718;", accent: true,
+          onClick: () => {
+            void invoke("invoke_verb", { selection: sel, background: null, verb: "pintohome" }).then(() => void loadSidebar());
+          },
+        };
+    items.push(
+      {
+        label: "压缩为 ZIP 文件", glyph: "&#xE8B5;", accent: true,
+        onClick: () => void invoke("compress_to_zip", { selection: sel }).then(() => {
+          setTimeout(() => void refresh(), 600);
+          setTimeout(() => void refresh(), 1800);
+        }),
+      },
+      pinOrFav,
+      { label: "复制路径", glyph: "&#xE8C8;", accent: true, onClick: copyAddresses },
+      { separator: true },
+    );
+  } else if (cur === THIS_PC) {
+    // 仅当选中单个本地磁盘时才显示驱动器工具组（无选中不显示，与资源管理器一致）
+    const drive = sel.length === 1 && /^[A-Za-z]:\\$/.test(sel[0]) ? sel[0][0] : null;
+    if (drive) items.push(...driveToolItems(drive), { separator: true });
+  } else if (isDriveRoot) {
+    // 磁盘根目录：工具组针对当前盘 + 固定到快速访问（与资源管理器一致）
+    items.push(
+      ...driveToolItems(cur[0]),
+      { separator: true },
+      pinItem(cur),
+      { separator: true },
+    );
+  } else if (cur && !cur.startsWith("::") && !cur.startsWith("shell:")) {
+    // 普通文件夹（含网络/WSL 路径）：仅固定到快速访问（与资源管理器一致）
+    items.push(pinItem(cur), { separator: true });
+  }
+  // 网络组：仅无选中的此电脑/网络视图显示（与资源管理器一致）
+  if (!hasFsSelection && (cur === THIS_PC || cur === "::{F02C1A0D-BE21-4350-88B0-7367FC96EF3C}")) {
+    items.push(
+      {
+        label: "连接到媒体服务器", glyph: "&#xE953;", accent: true,
+        onClick: () => void invoke("system_action", { action: "add-media-server" }),
+      },
+      {
+        label: "添加一个网络位置", glyph: "&#xE969;", accent: true,
+        onClick: () => void invoke("system_action", { action: "add-network-place" }),
+      },
+      {
+        label: "映射网络驱动器", glyph: "&#xE8CE;", accent: true,
+        onClick: () => void invoke("system_action", { action: "map-drive" }),
+      },
+      {
+        label: "断开网络驱动器的连接", glyph: "&#xE8CD;", accent: true,
+        onClick: () => void invoke("system_action", { action: "disconnect-drive" }),
+      },
+      { separator: true },
+    );
+  }
   items.push(
-    {
-      label: "连接到媒体服务器", glyph: "&#xE953;", accent: true,
-      onClick: () => void navigate("::{289AF617-1CC3-42A6-926C-E6A863F0E3BA}"),
-    },
-    {
-      label: "添加一个网络位置", glyph: "&#xE969;", accent: true,
-      onClick: () => void invoke("system_action", { action: "add-network-place" }),
-    },
-    {
-      label: "映射网络驱动器", glyph: "&#xE8CE;", accent: true,
-      onClick: () => void invoke("system_action", { action: "map-drive" }),
-    },
-    {
-      label: "断开网络驱动器的连接", glyph: "&#xE8CD;", accent: true,
-      onClick: () => void invoke("system_action", { action: "disconnect-drive" }),
-    },
-    { separator: true },
     { label: "全部选择", glyph: "&#xE8B3;", accent: true, onClick: selectAllItems },
     { label: "全部取消", glyph: "&#xE8E6;", accent: true, onClick: clearAllSelection },
     { label: "反向选择", glyph: "&#xE746;", accent: true, onClick: invertSelection },
@@ -2209,7 +2292,13 @@ function copyAddresses() {
   const paths = [...tab.selection].map(
     (p) => tab.listing?.entries.find((e) => e.parse_path === p)?.fs_path ?? p,
   );
-  if (paths.length) void navigator.clipboard.writeText(paths.join("\n"));
+  if (paths.length) writeClipboard(paths.join("\n"));
+}
+
+// 剪贴板写入：直接走后端 Win32（前端 navigator.clipboard 在 Tauri webview
+// 非安全上下文下不可靠/缺失，后端实现总能生效）
+function writeClipboard(text: string) {
+  void invoke("set_clipboard_text", { text });
 }
 
 // 顶部快捷条：剪切/复制/重命名/删除（与原版一致）
@@ -2628,7 +2717,7 @@ async function showSideItemMenu(x: number, y: number, entry: ShellEntry, el: HTM
   if (entry.fs_path) {
     items.push({
       label: "复制文件地址", glyph: "&#xE8C8;", accel: "Ctrl+Shift+C",
-      onClick: () => void navigator.clipboard.writeText(entry.fs_path!),
+      onClick: () => writeClipboard(entry.fs_path!),
     });
   }
   items.push({
@@ -2963,6 +3052,10 @@ function bindEvents() {
   const syncMaximized = async () => {
     const m = await appWindow.isMaximized();
     $("win-max-glyph").innerHTML = m ? "&#xE923;" : "&#xE922;";
+    // 上报最大化状态：最大化时后端在顶边盖一条本进程覆盖窗口，
+    // 屏蔽 WebView2 自己实现的边缘 resize 带（它不经过宿主命中测试，
+    // 运行时关闭设置又需导航才生效）；还原时隐藏，边缘拖拽调大小照常
+    void invoke("set_window_maximized", { maximized: m });
   };
   void appWindow.onResized(() => void syncMaximized());
   void syncMaximized();
@@ -3137,22 +3230,34 @@ function bindEvents() {
     fsTimer = window.setTimeout(() => void refresh(), 350);
   });
 
-  // Snap Layout：上报最大化按钮矩形（客户区物理像素），窗口尺寸/DPI 变化时重报；
-  // 命中测试返回 HTMAXBUTTON 后 HTML 按钮收不到鼠标事件，hover 背景由后端事件驱动
+  // Snap Layout / 顶边条：上报窗口控制按钮矩形（客户区物理像素），尺寸/DPI 变化时重报；
+  // 覆盖窗口接管后 HTML 按钮收不到鼠标事件，hover 背景由后端事件驱动
   const reportMaxBtnRect = () => {
-    const r = $("win-max").getBoundingClientRect();
     const s = window.devicePixelRatio;
-    void invoke("set_max_button_rect", {
-      x: Math.round(r.left * s),
-      y: Math.round(r.top * s),
-      w: Math.round(r.width * s),
-      h: Math.round(r.height * s),
-    });
+    const px = (el: HTMLElement) => {
+      const r = el.getBoundingClientRect();
+      return {
+        x: Math.round(r.left * s),
+        y: Math.round(r.top * s),
+        w: Math.round(r.width * s),
+        h: Math.round(r.height * s),
+      };
+    };
+    const mx = px($("win-max"));
+    void invoke("set_max_button_rect", mx);
+    const mn = px($("win-min"));
+    const cl = px($("win-close"));
+    void invoke("set_caption_rects", { minX: mn.x, minW: mn.w, closeX: cl.x, closeW: cl.w });
   };
   window.addEventListener("resize", reportMaxBtnRect);
   reportMaxBtnRect();
   void listen<boolean>("snap-hover", (ev) => {
     $("win-max").classList.toggle("nc-hover", ev.payload);
+  });
+  // 顶边条悬停最小化/关闭按钮时的高亮（顶边条屏蔽了 HTML :hover）
+  void listen<string>("nc-btn-hover", (ev) => {
+    $("win-min").classList.toggle("nc-hover", ev.payload === "min");
+    $("win-close").classList.toggle("nc-hover", ev.payload === "close");
   });
 
   // 禁用 WebView 默认右键菜单
