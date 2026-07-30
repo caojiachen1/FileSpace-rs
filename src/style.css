@@ -476,7 +476,7 @@ body.fullscreen .cmdbar { display: none; }
 }
 .icon-grid.ig-m-icons { grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); }
 .icon-grid.ig-l-icons { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); }
-.icon-grid.ig-xl-icons { grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); }
+.icon-grid.ig-xl-icons { grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); }
 .icon-grid.ig-s-icons { grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 1px; }
 .grid-item {
   display: flex;
@@ -493,7 +493,7 @@ body.fullscreen .cmdbar { display: none; }
 .grid-item.cut { opacity: 0.55; }
 .grid-item img { width: 48px; height: 48px; object-fit: contain; }
 .ig-l-icons .grid-item img { width: 96px; height: 96px; }
-.ig-xl-icons .grid-item img { width: 256px; height: 192px; }
+.ig-xl-icons .grid-item img { width: 176px; height: 256px; }
 .ig-s-icons .grid-item {
   flex-direction: row;
   justify-content: flex-start;

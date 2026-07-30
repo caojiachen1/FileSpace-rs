@@ -178,7 +178,7 @@ async function navigate(path: string, opts: { push?: boolean; selectPath?: strin
     tab.selection = new Set([sp]);
     tab.anchorIndex = idx;
     tab.focusIndex = idx;
-    renderList();
+    renderSelection();
     renderStatus();
     $("list-body").querySelector(`[data-path="${CSS.escape(sp)}"]`)?.scrollIntoView({ block: "nearest" });
   };
@@ -553,26 +553,79 @@ function setupNativeDnD() {
   void listen("fs-quick-access-changed", () => void loadSidebar());
 }
 
-// 缩略图批量加载（中/大/超大图标视图与预览窗格）
-async function loadThumbs(entries: ShellEntry[], targets: () => Map<string, HTMLImageElement>, size: number) {
-  const missing = entries.filter((e) => !iconCache.has(`t${size}|${e.parse_path}`));
-  const CHUNK = 24;
-  for (let i = 0; i < missing.length; i += CHUNK) {
-    const chunk = missing.slice(i, i + CHUNK);
-    const thumbs = await invoke<(string | null)[]>("get_thumbnails", {
-      paths: chunk.map((e) => e.parse_path),
-      size,
-    });
-    chunk.forEach((e, j) => {
-      if (thumbs[j]) iconCache.set(`t${size}|${e.parse_path}`, thumbs[j]!);
-    });
-    const map = targets();
-    chunk.forEach((e) => {
-      const img = map.get(e.parse_path);
-      const t = iconCache.get(`t${size}|${e.parse_path}`);
-      if (img && t) img.src = t;
-    });
+// 缩略图虚拟化加载（中/大/超大图标视图）：只请求视口（含预取边距）内的项，
+// 滚动到哪就先加载哪；已滚出视口且尚未发起请求的项自动出队，
+// 快速拖动滚动条时不会为中途扫过的区域积压请求
+let thumbGen = 0;
+let thumbObserver: IntersectionObserver | null = null;
+const thumbInFlight = new Set<string>(); // 跨渲染在途去重（key: t<size>|<path>）
+
+function cancelThumbLoad() {
+  thumbGen++;
+  thumbObserver?.disconnect();
+  thumbObserver = null;
+}
+
+function lazyLoadThumbs(entries: ShellEntry[], targets: () => Map<string, HTMLImageElement>, size: number) {
+  cancelThumbLoad();
+  const gen = thumbGen;
+  const key = (p: string) => `t${size}|${p}`;
+  const queue: string[] = [];      // 当前视口内待请求（滚出即移除）
+  const queued = new Set<string>();
+  const pathOf = new Map<Element, string>();
+  let pumping = false;
+
+  const pump = async () => {
+    if (pumping) return;
+    pumping = true;
+    // 超大缩略图单张成本高用更小批次；批间重读队列，新滚入的项能尽快插队
+    const CHUNK = size >= 256 ? 8 : 16;
+    while (gen === thumbGen && queue.length > 0) {
+      const batch = queue.splice(0, CHUNK);
+      batch.forEach((p) => { queued.delete(p); thumbInFlight.add(key(p)); });
+      try {
+        const thumbs = await invoke<(string | null)[]>("get_thumbnails", { paths: batch, size });
+        batch.forEach((p, j) => {
+          if (thumbs[j]) iconCache.set(key(p), thumbs[j]!);
+        });
+      } catch { /* 单批失败不中断，滚动重入视口时会重试 */ }
+      batch.forEach((p) => thumbInFlight.delete(key(p)));
+      // 落到最新渲染的 img（期间若发生重绘，targets() 返回的映射总是最新的）
+      const map = targets();
+      batch.forEach((p) => {
+        const img = map.get(p);
+        const t = iconCache.get(key(p));
+        if (img && t) img.src = t;
+      });
+    }
+    pumping = false;
+  };
+
+  const io = new IntersectionObserver((recs) => {
+    if (gen !== thumbGen) return;
+    for (const r of recs) {
+      const p = pathOf.get(r.target);
+      if (!p) continue;
+      if (r.isIntersecting) {
+        if (iconCache.has(key(p))) { io.unobserve(r.target); continue; }
+        if (!queued.has(p) && !thumbInFlight.has(key(p))) { queued.add(p); queue.push(p); }
+      } else if (queued.has(p)) {
+        // 滚出预取范围且未发起请求：出队，把配额让给新滚入的项
+        queued.delete(p);
+        const i = queue.indexOf(p);
+        if (i >= 0) queue.splice(i, 1);
+      }
+    }
+    if (queue.length > 0) void pump();
+  }, { root: $("list-body"), rootMargin: "50% 0px" }); // 上下各预取半屏
+
+  const map = targets();
+  for (const e of entries) {
+    if (iconCache.has(key(e.parse_path))) continue;
+    const img = map.get(e.parse_path);
+    if (img) { pathOf.set(img, e.parse_path); io.observe(img); }
   }
+  thumbObserver = io;
 }
 
 function renderAll() {
@@ -991,6 +1044,7 @@ function renderHeader() {
 function renderList() {
   const tab = activeTab();
   const body = $("list-body");
+  cancelThumbLoad(); // 旧视图的缩略图观察器随 DOM 一起废弃
   body.innerHTML = "";
   rowIconEls = new Map();
   const entries = sortedEntries(tab);
@@ -1024,7 +1078,7 @@ function renderList() {
     if (t.closest(ITEM_SELECTOR)) return; // 项目自身的右键由各自 handler 处理
     ev.preventDefault();
     tab.selection.clear();
-    renderList();
+    renderSelection();
     renderStatus();
     void showBackgroundMenu(ev.clientX, ev.clientY);
   };
@@ -1037,9 +1091,29 @@ function renderList() {
     if (tab.selection.size === 0) return;
     tab.selection.clear();
     tab.anchorIndex = -1;
-    renderList();
+    renderSelection();
     renderStatus();
   };
+}
+
+// 选中态快路径：只切换 class 与复选框，不重建 DOM。
+// 大文件夹（尤其超大图标缩略图）下全量 renderList 一次要销毁重建几千个
+// 带 base64 大图的节点，点击高亮会明显滞后；此路径与框选同源，只改样式
+function renderSelection() {
+  const tab = activeTab();
+  const entries = sortedEntries(tab);
+  const focusPath = entries[tab.focusIndex]?.parse_path;
+  const anchorPath = entries[tab.anchorIndex]?.parse_path;
+  $("list-body").querySelectorAll<HTMLElement>("[data-path]").forEach((el) => {
+    const p = el.dataset.path!;
+    const sel = tab.selection.has(p);
+    el.classList.toggle("selected", sel);
+    el.classList.toggle("kb-focus", p === focusPath);
+    // 此电脑驱动器卡片的锚点焦点框
+    if (el.classList.contains("drive-card")) el.classList.toggle("focus", sel && p === anchorPath);
+    const cb = el.querySelector<HTMLInputElement>(".item-check");
+    if (cb) cb.checked = sel;
+  });
 }
 
 // 公共：选中/双击/右键/剪切态 绑定
@@ -1090,7 +1164,7 @@ function bindItemEvents(el: HTMLElement, e: ShellEntry, idx: number, tab: Tab) {
     if (!tab.selection.has(e.parse_path)) {
       tab.selection = new Set([e.parse_path]);
       tab.anchorIndex = idx;
-      renderList();
+      renderSelection();
       renderStatus();
     }
     void showItemMenu(ev.clientX, ev.clientY);
@@ -1151,7 +1225,7 @@ function makeCheckbox(e: ShellEntry, tab: Tab): HTMLInputElement {
     ev.stopPropagation();
     if (cb.checked) tab.selection.add(e.parse_path);
     else tab.selection.delete(e.parse_path);
-    renderList();
+    renderSelection();
     renderStatus();
   };
   return cb;
@@ -1171,7 +1245,7 @@ function requestIcons(tab: Tab, entries: ShellEntry[]) {
   if (tab.listing?.parse_path === THIS_PC) {
     void loadIcons(entries, rowIconMap, 48);
   } else if (cfg.thumb) {
-    void loadThumbs(entries, rowIconMap, cfg.icon);
+    lazyLoadThumbs(entries, rowIconMap, cfg.icon);
   } else {
     void loadIcons(entries, rowIconMap, cfg.icon);
   }
@@ -1436,7 +1510,7 @@ function selectRow(idx: number, e: ShellEntry, ev: MouseEvent) {
     tab.selection = new Set([e.parse_path]);
     tab.anchorIndex = idx;
   }
-  renderList();
+  renderSelection();
   renderStatus();
 }
 
@@ -2072,7 +2146,7 @@ async function doRedo() {
 function selectAllItems() {
   const tab = activeTab();
   tab.selection = new Set(sortedEntries(tab).map((e) => e.parse_path));
-  renderList();
+  renderSelection();
   renderStatus();
 }
 function clearAllSelection() {
@@ -2080,14 +2154,14 @@ function clearAllSelection() {
   tab.selection.clear();
   tab.anchorIndex = -1;
   tab.focusIndex = -1;
-  renderList();
+  renderSelection();
   renderStatus();
 }
 function invertSelection() {
   const tab = activeTab();
   const all = sortedEntries(tab).map((e) => e.parse_path);
   tab.selection = new Set(all.filter((p) => !tab.selection.has(p)));
-  renderList();
+  renderSelection();
   renderStatus();
 }
 function showProperties() {
@@ -3042,7 +3116,7 @@ async function createNewFolder() {
         redo: async () => { await invoke("create_folder", { parent, name }); },
       });
       tab.selection = new Set([created.parse_path]);
-      renderList();
+      renderSelection();
       renderStatus();
       startRename();
     }
@@ -3078,7 +3152,7 @@ function applyFocus(path: string, mode: "select" | "extend" | "move") {
     const [a, b] = [Math.min(tab.anchorIndex, idx), Math.max(tab.anchorIndex, idx)];
     tab.selection = new Set(entries.slice(a, b + 1).map((x) => x.parse_path));
   }
-  renderList();
+  renderSelection();
   renderStatus();
   $("list-body").querySelector(`[data-path="${CSS.escape(path)}"]`)?.scrollIntoView({ block: "nearest" });
 }
@@ -3166,7 +3240,7 @@ function focusSelect(toggle: boolean) {
   if (toggle && tab.selection.has(e.parse_path)) tab.selection.delete(e.parse_path);
   else tab.selection.add(e.parse_path);
   tab.anchorIndex = tab.focusIndex;
-  renderList();
+  renderSelection();
   renderStatus();
 }
 
