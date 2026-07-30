@@ -648,7 +648,8 @@ function renderBreadcrumb() {
   const listing = activeTab().listing;
   if (!listing) return;
 
-  // 点击分隔箭头：下拉列出该段的子文件夹供快速切换（与资源管理器一致）
+  // 点击分隔箭头：下拉列出该段的子文件夹供快速切换（与资源管理器一致）；
+  // 展开时右箭头连贯旋转成下箭头（open 类），关闭时由 closeDropdown 统一复位
   const chevDropdown = async (chev: HTMLElement, parsePath: string) => {
     if (suppressAnchor === chev) { suppressAnchor = null; return; }
     try {
@@ -656,12 +657,14 @@ function renderBreadcrumb() {
       const folders = l.entries.filter((e) => e.is_folder);
       if (folders.length === 0) {
         showDropdown(chev, [{ label: "（无子文件夹）", disabled: true }]);
+        chev.classList.add("open");
         return;
       }
       showDropdown(chev, folders.map((f) => ({
         label: stripNetworkSuffix(f.name),
         onClick: () => void navigate(f.parse_path),
       })));
+      chev.classList.add("open");
     } catch { /* 该段不可枚举 */ }
   };
 
@@ -679,7 +682,7 @@ function renderBreadcrumb() {
   bc.append(locIcon);
   const rootChev = document.createElement("span");
   rootChev.className = "fluent crumb-chev";
-  rootChev.innerHTML = "&#xE76C;";
+  rootChev.innerHTML = '<span class="chev-glyph">&#xE76C;</span>';
   rootChev.onclick = async (ev) => {
     ev.stopPropagation();
     if (suppressAnchor === rootChev) { suppressAnchor = null; return; }
@@ -694,10 +697,11 @@ function renderBreadcrumb() {
       label: stripNetworkSuffix(f.name),
       onClick: () => void navigate(f.parse_path),
     })));
+    rootChev.classList.add("open");
   };
   bc.append(rootChev);
 
-  listing.breadcrumb.forEach((c, i) => {
+  listing.breadcrumb.forEach((c) => {
     const el = document.createElement("div");
     el.className = "crumb";
     el.textContent = c.name;
@@ -709,11 +713,10 @@ function renderBreadcrumb() {
       void navigate(c.parse_path, { push: true, selectPath: childOnPathTo(c.parse_path) });
     };
     bc.append(el);
-    const isLast = i === listing.breadcrumb.length - 1;
     const chev = document.createElement("span");
     chev.className = "fluent crumb-chev";
-    // 末段用下拉箭头，中间段用 > 分隔符
-    chev.innerHTML = isLast ? "&#xE70D;" : "&#xE76C;";
+    // 统一显示右箭头（含末段），下拉展开时旋转成下箭头
+    chev.innerHTML = '<span class="chev-glyph">&#xE76C;</span>';
     chev.onclick = (ev) => {
       ev.stopPropagation();
       void chevDropdown(chev, c.parse_path);
@@ -1713,6 +1716,8 @@ function slideOutWithChildren(wrap: HTMLElement) {
 
 function closeDropdown() {
   document.querySelectorAll<HTMLElement>(".dropdown-wrap").forEach(slideOut);
+  // 面包屑箭头复位：下箭头转回右箭头
+  document.querySelectorAll<HTMLElement>(".crumb-chev.open").forEach((el) => el.classList.remove("open"));
   dropdownAnchor = null;
   document.removeEventListener("mousedown", onDocDown, true);
   ctxUiOpen = false;
