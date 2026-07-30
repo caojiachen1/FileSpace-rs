@@ -10,6 +10,7 @@ mod shell_menu;
 mod shell_modern;
 mod shell_thread;
 mod shell_watch;
+mod snap_layout;
 
 fn main() {
     shell_thread::start();
@@ -49,6 +50,8 @@ fn main() {
             commands::get_image_size,
             commands::get_item_details,
             commands::init_drag_drop,
+            commands::init_snap_layout,
+            commands::set_max_button_rect,
             commands::start_drag,
             commands::update_drop_target,
         ])

@@ -2957,11 +2957,12 @@ function bindEvents() {
   $("win-min").onclick = () => void appWindow.minimize();
   $("win-max").onclick = () => void appWindow.toggleMaximize();
   $("win-close").onclick = () => void appWindow.close();
-  // 最大化时禁用边缘 resize 判定：避免顶部显示拖拽光标，且屏幕最右上角能直接命中关闭按钮
+  // 同步最大化图标。注意：不要在最大化时 setResizable(false)——摘掉 WS_SIZEBOX 会让
+  // 系统判定窗口不可贴靠，Snap Layout（悬停/Win+Z）全部失效；
+  // tao 0.35 的 WM_NCHITTEST 已自带 !is_maximized 保护，最大化时不会出现顶边 resize 光标
   const syncMaximized = async () => {
     const m = await appWindow.isMaximized();
     $("win-max-glyph").innerHTML = m ? "&#xE923;" : "&#xE922;";
-    await appWindow.setResizable(!m);
   };
   void appWindow.onResized(() => void syncMaximized());
   void syncMaximized();
@@ -3136,6 +3137,24 @@ function bindEvents() {
     fsTimer = window.setTimeout(() => void refresh(), 350);
   });
 
+  // Snap Layout：上报最大化按钮矩形（客户区物理像素），窗口尺寸/DPI 变化时重报；
+  // 命中测试返回 HTMAXBUTTON 后 HTML 按钮收不到鼠标事件，hover 背景由后端事件驱动
+  const reportMaxBtnRect = () => {
+    const r = $("win-max").getBoundingClientRect();
+    const s = window.devicePixelRatio;
+    void invoke("set_max_button_rect", {
+      x: Math.round(r.left * s),
+      y: Math.round(r.top * s),
+      w: Math.round(r.width * s),
+      h: Math.round(r.height * s),
+    });
+  };
+  window.addEventListener("resize", reportMaxBtnRect);
+  reportMaxBtnRect();
+  void listen<boolean>("snap-hover", (ev) => {
+    $("win-max").classList.toggle("nc-hover", ev.payload);
+  });
+
   // 禁用 WebView 默认右键菜单
   document.addEventListener("contextmenu", (ev) => ev.preventDefault());
 }
@@ -3148,6 +3167,7 @@ async function init() {
   tabs.push(newTab(start));
   activeTabIdx = 0;
   void invoke("init_drag_drop");
+  void invoke("init_snap_layout");
   await Promise.all([navigate(start, { push: false }), loadSidebar()]);
 }
 

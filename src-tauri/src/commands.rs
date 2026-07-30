@@ -208,6 +208,18 @@ pub async fn init_drag_drop(app: tauri::AppHandle) {
     crate::drag_drop::init(&app);
 }
 
+/// 安装 Snap Layout 命中测试子类化（Win11 悬停最大化按钮弹布局面板）
+#[tauri::command]
+pub async fn init_snap_layout(app: tauri::AppHandle) {
+    crate::snap_layout::init(&app);
+}
+
+/// 前端上报最大化按钮矩形（客户区物理像素）
+#[tauri::command]
+pub async fn set_max_button_rect(x: i32, y: i32, w: i32, h: i32) {
+    crate::snap_layout::set_rect(x, y, w, h);
+}
+
 #[tauri::command]
 pub async fn start_drag(app: tauri::AppHandle, paths: Vec<String>) {
     crate::drag_drop::start_drag(app, paths);
