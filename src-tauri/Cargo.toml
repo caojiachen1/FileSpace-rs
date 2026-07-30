@@ -33,6 +33,7 @@ features = [
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_Graphics_Gdi",
+    "Win32_Graphics_Dwm",
     "Win32_Graphics_Imaging",
     "Win32_Storage_FileSystem",
     "Win32_Storage_EnhancedStorage",

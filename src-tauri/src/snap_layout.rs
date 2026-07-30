@@ -13,24 +13,31 @@
 // - 覆盖窗口不能用 WS_EX_LAYERED（命中测试整窗穿透），须用普通 "STATIC" 类子窗口；
 // - 不能用 setResizable(false)（摘 WS_SIZEBOX 后系统判定不可贴靠，Snap 全灭）。
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicIsize, AtomicU8, Ordering};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use tauri::{AppHandle, Emitter, Manager};
 use windows::core::w;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
-use windows::Win32::Graphics::Gdi::ScreenToClient;
+use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_BORDER_COLOR};
+use windows::Win32::Graphics::Gdi::{
+    GetMonitorInfoW, MonitorFromWindow, ScreenToClient, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     TrackMouseEvent, TME_LEAVE, TME_NONCLIENT, TRACKMOUSEEVENT,
 };
-use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
+use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, GetClientRect, GetSystemMetrics, IsZoomed, LoadCursorW, PostMessageW,
-    SendMessageW, SetCursor, SetWindowPos, ShowWindow, HWND_TOP, IDC_ARROW, SC_CLOSE,
-    SC_MAXIMIZE, SC_MINIMIZE, SC_RESTORE, SM_CXPADDEDBORDER, SM_CYSIZEFRAME, SWP_NOACTIVATE,
-    SW_HIDE, SW_SHOWNA, WINDOW_EX_STYLE, WM_NCHITTEST, WM_NCLBUTTONDBLCLK, WM_NCLBUTTONDOWN,
-    WM_NCLBUTTONUP, WM_NCMOUSELEAVE, WM_SETCURSOR, WM_SYSCOMMAND, WS_CHILD, WS_VISIBLE,
+    CreateWindowExW, GetClientRect, GetSystemMetrics, GetWindowLongW, GetWindowPlacement,
+    IsZoomed, LoadCursorW, PostMessageW, SendMessageW, SetCursor, SetWindowLongW,
+    SetWindowPlacement, SetWindowPos, ShowWindow, GWL_STYLE, HWND_TOP, IDC_ARROW, SC_CLOSE,
+    SC_MAXIMIZE, SC_MINIMIZE, SC_RESTORE, SM_CXPADDEDBORDER, SM_CYSIZEFRAME, SWP_FRAMECHANGED,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOWNA,
+    WINDOWPLACEMENT, WINDOW_EX_STYLE, WM_NCCALCSIZE, WM_NCHITTEST, WM_NCLBUTTONDBLCLK,
+    WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMOUSELEAVE, WM_SETCURSOR, WM_SYSCOMMAND, WS_CHILD,
+    WS_MAXIMIZE, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
 };
 
+const HTCLIENT: isize = 1;
 const HTCAPTION: isize = 2;
 const HTMINBUTTON: isize = 8;
 const HTMAXBUTTON: isize = 9;
@@ -285,6 +292,103 @@ pub fn set_caption_rects(min_x: i32, min_w: i32, close_x: i32, close_w: i32) {
 pub fn set_maximized(m: bool) {
     MAXIMIZED.store(m, Ordering::Relaxed);
     on_main(|| unsafe { sync_strip() });
+}
+
+/* ===================== F11 原生全屏 ===================== */
+// Raymond Chen 经典方案：保存样式与 WINDOWPLACEMENT，单次 SetWindowPos 直达显示器矩形。
+// 不用 tao setFullscreen：它先还原/切样式，产生窗口化中间帧与经典边框闪烁。
+// 进入时同时摘掉 WS_MAXIMIZE 位：免去先还原一步，也避免系统按工作区钳制窗口（底部黑条）；
+// 退出时 SetWindowPlacement 直接回到之前的最大化/普通状态，无中间动画。
+//
+// 四周边线问题：绕过 tao 后它不知道处于全屏，其 WM_NCCALCSIZE 仍按“无边框+阴影”
+// 把客户区四周内缩 frame 厚度（黑边），Win11 DWM 又给普通窗口画 1px 边框（白边）。
+// 全屏期间给主窗口加子类拦截 WM_NCCALCSIZE（客户区=整窗，后装子类先收消息，
+// tao 的 inset 逻辑不会执行），并用 DWMWA_BORDER_COLOR=NONE 关掉系统边框；退出时还原
+static FS_SAVED: Mutex<Option<(i32, WINDOWPLACEMENT)>> = Mutex::new(None);
+const FS_SUBCLASS_ID: usize = 0x5AF;
+const DWMWA_COLOR_DEFAULT: u32 = 0xFFFFFFFF;
+const DWMWA_COLOR_NONE: u32 = 0xFFFFFFFE;
+
+unsafe extern "system" fn fs_subclass_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    _id: usize,
+    _data: usize,
+) -> LRESULT {
+    match msg {
+        // 客户区 = 整个窗口矩形，无任何内缩
+        WM_NCCALCSIZE => LRESULT(0),
+        // 全屏无 resize 边，避免屏幕边缘出现调大小光标
+        WM_NCHITTEST => LRESULT(HTCLIENT),
+        _ => DefSubclassProc(hwnd, msg, wparam, lparam),
+    }
+}
+
+fn set_dwm_border(hwnd: HWND, color: u32) {
+    unsafe {
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_BORDER_COLOR,
+            &color as *const _ as *const std::ffi::c_void,
+            std::mem::size_of::<u32>() as u32,
+        );
+    }
+}
+
+pub fn set_fullscreen_native(on: bool) {
+    on_main(move || unsafe {
+        let hwnd = parent_hwnd();
+        if hwnd.0.is_null() {
+            return;
+        }
+        if on {
+            let style = GetWindowLongW(hwnd, GWL_STYLE);
+            let mut wp = WINDOWPLACEMENT {
+                length: std::mem::size_of::<WINDOWPLACEMENT>() as u32,
+                ..Default::default()
+            };
+            let _ = GetWindowPlacement(hwnd, &mut wp);
+            let mut mi = MONITORINFO {
+                cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                ..Default::default()
+            };
+            if !GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mut mi).as_bool() {
+                return;
+            }
+            *FS_SAVED.lock().unwrap() = Some((style, wp));
+            // 后装的子类先收到消息，拦下 WM_NCCALCSIZE，tao 的阴影 inset 不再生效
+            let _ = SetWindowSubclass(hwnd, Some(fs_subclass_proc), FS_SUBCLASS_ID, 0);
+            set_dwm_border(hwnd, DWMWA_COLOR_NONE);
+            let fs_style = style & !((WS_OVERLAPPEDWINDOW.0 | WS_MAXIMIZE.0) as i32);
+            SetWindowLongW(hwnd, GWL_STYLE, fs_style);
+            let rc = mi.rcMonitor;
+            let _ = SetWindowPos(
+                hwnd,
+                Some(HWND_TOP),
+                rc.left,
+                rc.top,
+                rc.right - rc.left,
+                rc.bottom - rc.top,
+                SWP_NOOWNERZORDER | SWP_FRAMECHANGED,
+            );
+        } else if let Some((style, wp)) = FS_SAVED.lock().unwrap().take() {
+            let _ = RemoveWindowSubclass(hwnd, Some(fs_subclass_proc), FS_SUBCLASS_ID);
+            set_dwm_border(hwnd, DWMWA_COLOR_DEFAULT);
+            SetWindowLongW(hwnd, GWL_STYLE, style);
+            let _ = SetWindowPlacement(hwnd, &wp);
+            let _ = SetWindowPos(
+                hwnd,
+                None,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_FRAMECHANGED,
+            );
+        }
+    });
 }
 
 /// 创建覆盖窗口（须在主线程；WebView2 已创建后调用，保证盖在其上方）

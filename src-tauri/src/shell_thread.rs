@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
-use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE};
+use windows::Win32::System::Ole::OleInitialize;
 use windows::Win32::UI::Shell::{IContextMenu2, IContextMenu3};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, PeekMessageW, RegisterClassW,
@@ -110,7 +110,10 @@ pub fn start() {
         .name("shell-sta".into())
         .spawn(move || {
             unsafe {
-                let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+                // 必须用 OleInitialize（内含 STA CoInitializeEx）：剪切/复制/粘贴 verb
+                // 内部走 OleSetClipboard/OleGetClipboard，仅 CoInitializeEx 会以
+                // CO_E_NOTINITIALIZED 静默失败，表现为复制后无法粘贴
+                let _ = OleInitialize(None);
             }
             let hwnd = create_helper_window();
             HELPER_HWND.with(|h| *h.borrow_mut() = hwnd);

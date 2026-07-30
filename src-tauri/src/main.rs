@@ -32,6 +32,7 @@ fn main() {
             commands::quick_access_verb,
             commands::rename_item,
             commands::create_folder,
+            commands::delete_items,
             commands::watch_folder,
             commands::system_action,
             commands::compress_to_zip,
@@ -57,6 +58,7 @@ fn main() {
             commands::set_max_button_rect,
             commands::set_window_maximized,
             commands::set_caption_rects,
+            commands::set_fullscreen_native,
             commands::start_drag,
             commands::update_drop_target,
         ])

@@ -88,6 +88,12 @@ pub async fn create_folder(parent: String, name: String) -> Result<(), String> {
     run_on_shell(move || shell_menu::new_folder(&parent, &name))
 }
 
+/// 删除项目：permanent=true 为 Shift+Delete 永久删除（不进回收站）
+#[tauri::command]
+pub async fn delete_items(paths: Vec<String>, permanent: bool) -> Result<(), String> {
+    run_on_shell(move || shell_menu::delete_items(paths, permanent))
+}
+
 #[tauri::command]
 pub async fn watch_folder(path: String) {
     run_on_shell(move || crate::shell_watch::watch(&path))
@@ -248,6 +254,13 @@ pub async fn set_window_maximized(maximized: bool) {
 #[tauri::command]
 pub async fn set_caption_rects(min_x: i32, min_w: i32, close_x: i32, close_w: i32) {
     crate::snap_layout::set_caption_rects(min_x, min_w, close_x, close_w);
+}
+
+/// F11 原生全屏：保存样式/placement 后单次 SetWindowPos 直达显示器矩形，
+/// 避免 tao setFullscreen 的中间帧闪烁（先还原/切样式）
+#[tauri::command]
+pub async fn set_fullscreen_native(on: bool) {
+    crate::snap_layout::set_fullscreen_native(on);
 }
 
 #[tauri::command]

@@ -81,6 +81,7 @@ interface Tab {
   listing: FolderListing | null;
   selection: Set<string>;
   anchorIndex: number;
+  focusIndex: number;
   sortKey: SortKey;
   sortAsc: boolean;
   filter: string;
@@ -104,6 +105,7 @@ function newTab(path: string): Tab {
     listing: null,
     selection: new Set(),
     anchorIndex: -1,
+    focusIndex: -1,
     sortKey: "name",
     sortAsc: true,
     filter: "",
@@ -175,6 +177,7 @@ async function navigate(path: string, opts: { push?: boolean; selectPath?: strin
     if (idx < 0) return;
     tab.selection = new Set([sp]);
     tab.anchorIndex = idx;
+    tab.focusIndex = idx;
     renderList();
     renderStatus();
     $("list-body").querySelector(`[data-path="${CSS.escape(sp)}"]`)?.scrollIntoView({ block: "nearest" });
@@ -1043,6 +1046,7 @@ function bindItemEvents(el: HTMLElement, e: ShellEntry, idx: number, tab: Tab) {
   if (e.fs_path) el.dataset.fs = e.fs_path;
   el.dataset.dropName = e.name;
   if (tab.selection.has(e.parse_path)) el.classList.add("selected");
+  if (idx === tab.focusIndex) el.classList.add("kb-focus");
   if (cutPaths.has(e.parse_path)) el.classList.add("cut");
   // 按下前是否已是唯一选中项（"再次单击名称进入重命名"判定，与资源管理器一致）
   let preSelected = false;
@@ -1417,6 +1421,7 @@ function renderThisPc(body: HTMLElement, tab: Tab, entries: ShellEntry[]) {
 function selectRow(idx: number, e: ShellEntry, ev: MouseEvent) {
   const tab = activeTab();
   const entries = sortedEntries(tab);
+  tab.focusIndex = idx;
   if (ev.shiftKey && tab.anchorIndex >= 0) {
     const [a, b] = [Math.min(tab.anchorIndex, idx), Math.max(tab.anchorIndex, idx)];
     tab.selection = new Set(entries.slice(a, b + 1).map((x) => x.parse_path));
@@ -2024,16 +2029,37 @@ async function showNewMenu(anchor: HTMLElement) {
 interface UndoOp {
   label: string;
   run: () => Promise<void>;
+  redo?: () => Promise<void>; // Ctrl+Y 重做（可逆操作才提供）
 }
 const undoStack: UndoOp[] = [];
+const redoStack: UndoOp[] = [];
+
+// 新操作入栈时清空重做栈（与系统撤消/重做语义一致）
+function pushUndo(op: UndoOp) {
+  undoStack.push(op);
+  redoStack.length = 0;
+}
 
 async function doUndo() {
   const op = undoStack.pop();
   if (!op) return;
   try {
     await op.run();
+    if (op.redo) redoStack.push(op);
   } catch (e) {
     console.error("undo failed:", e);
+  }
+  void refresh();
+}
+
+async function doRedo() {
+  const op = redoStack.pop();
+  if (!op?.redo) return;
+  try {
+    await op.redo();
+    undoStack.push(op);
+  } catch (e) {
+    console.error("redo failed:", e);
   }
   void refresh();
 }
@@ -2048,6 +2074,7 @@ function clearAllSelection() {
   const tab = activeTab();
   tab.selection.clear();
   tab.anchorIndex = -1;
+  tab.focusIndex = -1;
   renderList();
   renderStatus();
 }
@@ -2965,14 +2992,15 @@ function startRename() {
     if (newName && newName !== entry.name) {
       try {
         await invoke("rename_item", { path, newName });
-        // 记录可撤消：改回原名（仅限真实文件系统路径）
+        // 记录可撤消：改回原名（仅限真实文件系统路径）；重做：再次改为新名
         const sep = path.lastIndexOf("\\");
         if (sep > 0) {
           const newPath = path.slice(0, sep + 1) + newName;
           const oldName = entry.full_name || entry.name;
-          undoStack.push({
+          pushUndo({
             label: "重命名",
             run: async () => { await invoke("rename_item", { path: newPath, newName: oldName }); },
+            redo: async () => { await invoke("rename_item", { path, newName }); },
           });
         }
       } catch (e) { console.error(e); }
@@ -3002,10 +3030,11 @@ async function createNewFolder() {
     const created = tab.listing?.entries.find((e) => e.name === name);
     if (created) {
       const createdPath = created.parse_path;
-      // 记录可撤消：删除新建的文件夹（回收站）
-      undoStack.push({
+      // 记录可撤消：删除新建的文件夹（回收站）；重做：重新创建
+      pushUndo({
         label: "新建文件夹",
         run: async () => { await invoke("invoke_verb", { selection: [createdPath], background: null, verb: "delete" }); },
+        redo: async () => { await invoke("create_folder", { parent, name }); },
       });
       tab.selection = new Set([created.parse_path]);
       renderList();
@@ -3013,6 +3042,221 @@ async function createNewFolder() {
       startRename();
     }
   } catch (e) { console.error(e); }
+}
+
+/* ===================== 键盘导航与快捷键 ===================== */
+// 视图缩放序列（Ctrl+滚轮 / Ctrl+Shift+数字，与资源管理器一致：内容 → … → 超大图标）
+const VIEW_ORDER: ViewMode[] = ["content", "tiles", "details", "list", "s-icons", "m-icons", "l-icons", "xl-icons"];
+
+// Ctrl+滚轮：沿视图序列缩放
+function zoomView(delta: number) {
+  const i = VIEW_ORDER.indexOf(activeTab().view);
+  if (i < 0) return;
+  const ni = Math.min(VIEW_ORDER.length - 1, Math.max(0, i + delta));
+  if (ni !== i) setView(VIEW_ORDER[ni]);
+}
+
+const focusableEls = () => [...$("list-body").querySelectorAll<HTMLElement>("[data-path]")];
+
+// 把焦点移到指定项：select=单选，extend=Shift 扩选（锚点固定），move=Ctrl 仅移动焦点
+function applyFocus(path: string, mode: "select" | "extend" | "move") {
+  const tab = activeTab();
+  const entries = sortedEntries(tab);
+  const idx = entries.findIndex((e) => e.parse_path === path);
+  if (idx < 0) return;
+  tab.focusIndex = idx;
+  if (mode === "select") {
+    tab.selection = new Set([path]);
+    tab.anchorIndex = idx;
+  } else if (mode === "extend") {
+    if (tab.anchorIndex < 0) tab.anchorIndex = idx;
+    const [a, b] = [Math.min(tab.anchorIndex, idx), Math.max(tab.anchorIndex, idx)];
+    tab.selection = new Set(entries.slice(a, b + 1).map((x) => x.parse_path));
+  }
+  renderList();
+  renderStatus();
+  $("list-body").querySelector(`[data-path="${CSS.escape(path)}"]`)?.scrollIntoView({ block: "nearest" });
+}
+
+// 方向键/Home/End/翻页：几何寻位，兼容所有视图（详细信息/网格/列表流/磁盘卡片分组）
+function moveFocusDir(key: string, ev: KeyboardEvent) {
+  const tab = activeTab();
+  const els = focusableEls();
+  if (els.length === 0) return;
+  const mode: "select" | "extend" | "move" = ev.shiftKey ? "extend" : ev.ctrlKey ? "move" : "select";
+  const entries = sortedEntries(tab);
+  const curPath = tab.focusIndex >= 0 ? entries[tab.focusIndex]?.parse_path : undefined;
+  const curEl = curPath ? els.find((el) => el.dataset.path === curPath) : undefined;
+  if (!curEl) {
+    applyFocus(els[0].dataset.path!, mode === "extend" ? "select" : mode);
+    return;
+  }
+  if (key === "Home") { applyFocus(els[0].dataset.path!, mode); return; }
+  if (key === "End") { applyFocus(els[els.length - 1].dataset.path!, mode); return; }
+  const r = curEl.getBoundingClientRect();
+  const page = $("list-body").clientHeight;
+  const overlapX = (b: DOMRect) => b.left < r.right - 1 && b.right > r.left + 1;
+  const overlapY = (b: DOMRect) => b.top < r.bottom - 1 && b.bottom > r.top + 1;
+  let best: HTMLElement | null = null;
+  let bestScore = Infinity;
+  for (const el of els) {
+    if (el === curEl) continue;
+    const b = el.getBoundingClientRect();
+    let score = Infinity;
+    switch (key) {
+      case "ArrowDown":
+        if (b.top > r.top + 1 && overlapX(b)) score = (b.top - r.top) * 10000 + Math.abs(b.left - r.left);
+        break;
+      case "ArrowUp":
+        if (b.top < r.top - 1 && overlapX(b)) score = (r.top - b.top) * 10000 + Math.abs(b.left - r.left);
+        break;
+      case "ArrowRight":
+        if (b.left > r.left + 1 && overlapY(b)) score = (b.left - r.left) * 10000 + Math.abs(b.top - r.top);
+        break;
+      case "ArrowLeft":
+        if (b.left < r.left - 1 && overlapY(b)) score = (r.left - b.left) * 10000 + Math.abs(b.top - r.top);
+        break;
+      case "PageDown": // 同列向下最远但不超一屏
+        if (b.top > r.top + 1 && overlapX(b) && b.top - r.top <= page) score = -(b.top - r.top);
+        break;
+      case "PageUp":
+        if (b.top < r.top - 1 && overlapX(b) && r.top - b.top <= page) score = -(r.top - b.top);
+        break;
+    }
+    if (score < bestScore) { bestScore = score; best = el; }
+  }
+  // 剩余不足一屏时翻页直接到首/尾
+  if (!best && key === "PageDown") best = els[els.length - 1];
+  if (!best && key === "PageUp") best = els[0];
+  if (best && best !== curEl) applyFocus(best.dataset.path!, mode);
+}
+
+// 首字母定位：短时间连续键入拼前缀；重复同一字母则在该字母开头的项间循环
+let typeBuf = "";
+let typeTimer = 0;
+function typeAhead(ch: string) {
+  window.clearTimeout(typeTimer);
+  typeTimer = window.setTimeout(() => { typeBuf = ""; }, 1000);
+  typeBuf += ch.toLowerCase();
+  const tab = activeTab();
+  const entries = sortedEntries(tab);
+  if (entries.length === 0) return;
+  const allSame = [...typeBuf].every((c) => c === typeBuf[0]);
+  const prefix = allSame ? typeBuf[0] : typeBuf;
+  const start = allSame ? tab.focusIndex + 1 : Math.max(0, tab.focusIndex);
+  for (let i = 0; i < entries.length; i++) {
+    const idx = (start + i + entries.length) % entries.length;
+    if (displayName(entries[idx]).toLowerCase().startsWith(prefix)) {
+      applyFocus(entries[idx].parse_path, "select");
+      return;
+    }
+  }
+}
+
+// Ctrl+Space：切换焦点项选中态；Space：添加焦点项到选中
+function focusSelect(toggle: boolean) {
+  const tab = activeTab();
+  const e = sortedEntries(tab)[tab.focusIndex];
+  if (!e) return;
+  if (toggle && tab.selection.has(e.parse_path)) tab.selection.delete(e.parse_path);
+  else tab.selection.add(e.parse_path);
+  tab.anchorIndex = tab.focusIndex;
+  renderList();
+  renderStatus();
+}
+
+// Enter：打开所有选中项（多个文件夹开新标签页）；Shift+Enter：文件夹在新窗口打开
+function openSelection(newWindow = false) {
+  const tab = activeTab();
+  const sel = sortedEntries(tab).filter((e) => tab.selection.has(e.parse_path));
+  if (sel.length === 0) return;
+  if (newWindow) {
+    for (const e of sel) {
+      if (e.is_folder) void invoke("open_new_window", { path: e.parse_path });
+      else void invoke("open_item", { path: e.parse_path });
+    }
+    return;
+  }
+  if (sel.length === 1) { void openEntry(sel[0]); return; }
+  for (const e of sel) {
+    if (e.is_folder) addTab(e.parse_path);
+    else void invoke("open_item", { path: e.parse_path });
+  }
+}
+
+// Shift+Delete：永久删除（系统确认对话框，不进回收站）
+function deletePermanent() {
+  if (isVirtualLocation()) return;
+  const sel = [...activeTab().selection];
+  if (sel.length === 0) return;
+  void invoke("delete_items", { paths: sel, permanent: true })
+    .then(() => {
+      cutPaths = new Set();
+      setTimeout(() => void refresh(), 500);
+    })
+    .catch((e) => console.error(e));
+}
+
+// Ctrl+Tab / Ctrl+Shift+Tab：循环切换标签页
+function switchTab(delta: number) {
+  if (tabs.length < 2) return;
+  activeTabIdx = (activeTabIdx + delta + tabs.length) % tabs.length;
+  renderAll();
+}
+
+// Ctrl+Shift+E：在导航窗格中展开到当前文件夹（与资源管理器一致）
+async function expandNavToCurrent() {
+  const bc = activeTab().listing?.breadcrumb ?? [];
+  thisPcExpanded = true;
+  const keys = bc.slice(0, -1).map((c) => c.parse_path).filter((p) => p !== THIS_PC);
+  keys.forEach((k) => sideExpanded.add(k));
+  renderSidebar();
+  for (const key of keys) {
+    if (sideChildren.has(key) || sideFetching.has(key)) continue;
+    sideFetching.add(key);
+    try {
+      const l = await invoke<FolderListing>("list_folder", { path: key });
+      const kids = l.entries.filter((e) => e.is_folder);
+      sideChildren.set(key, kids);
+      if (kids.length === 0) { sideHasKids.set(key, false); sideExpanded.delete(key); }
+      void loadIcons(kids, () => new Map()).then(renderSidebar);
+    } catch {
+      sideChildren.set(key, []);
+      sideHasKids.set(key, false);
+      sideExpanded.delete(key);
+    } finally {
+      sideFetching.delete(key);
+    }
+    renderSidebar();
+  }
+}
+
+// Shift+F10 / 菜单键：在焦点项处弹出右键菜单（无选中时弹背景菜单）
+function showKeyboardContextMenu() {
+  const tab = activeTab();
+  const body = $("list-body");
+  if (tab.selection.size > 0) {
+    const entries = sortedEntries(tab);
+    const focusPath = entries[tab.focusIndex]?.parse_path;
+    const path = focusPath && tab.selection.has(focusPath) ? focusPath : [...tab.selection][0];
+    const el = body.querySelector(`[data-path="${CSS.escape(path)}"]`);
+    const r = (el ?? body).getBoundingClientRect();
+    void showItemMenu(Math.min(r.left + 40, r.right), r.bottom - 2);
+  } else {
+    const r = body.getBoundingClientRect();
+    void showBackgroundMenu(r.left + 60, r.top + 60);
+  }
+}
+
+// F11：全屏切换（与资源管理器一致：盖住任务栏，隐藏标题栏/地址栏/命令栏，
+// 保留侧栏+列表+状态栏；再按 F11 还原）
+// 走后端原生实现（保存 placement + 单次 SetWindowPos）：tao setFullscreen 会先还原/
+// 切样式，产生窗口化中间帧与经典边框闪烁；退出时直接回到之前的最大化/普通状态
+let fullscreenMode = false;
+function toggleFullscreen() {
+  fullscreenMode = !fullscreenMode;
+  document.body.classList.toggle("fullscreen", fullscreenMode);
+  void invoke("set_fullscreen_native", { on: fullscreenMode });
 }
 
 /* ===================== 标签页 ===================== */
@@ -3149,34 +3393,130 @@ function bindEvents() {
   };
   search.onkeydown = (ev) => ev.stopPropagation();
 
+  // 全局快捷键（与资源管理器一致；输入框内不拦截）
   document.addEventListener("keydown", (ev) => {
+    if ((ev.target as HTMLElement).closest("input, textarea, [contenteditable]")) return;
     const tab = activeTab();
-    if (ev.ctrlKey && ev.key.toLowerCase() === "a") {
-      ev.preventDefault();
-      tab.selection = new Set(sortedEntries(tab).map((e) => e.parse_path));
-      renderList(); renderStatus();
-    } else if (ev.ctrlKey && ev.shiftKey && ev.key.toLowerCase() === "c") { copyAddresses(); }
-    else if (ev.ctrlKey && ev.key.toLowerCase() === "c") { void runVerb("copy"); }
-    else if (ev.ctrlKey && ev.key.toLowerCase() === "z") { void doUndo(); }
-    else if (ev.ctrlKey && ev.key.toLowerCase() === "x") { void runVerb("cut"); }
-    else if (ev.ctrlKey && ev.key.toLowerCase() === "v") { void runVerb("paste"); }
-    else if (ev.ctrlKey && ev.key.toLowerCase() === "t") { addTab(THIS_PC); }
-    else if (ev.ctrlKey && ev.key.toLowerCase() === "w") { closeTab(activeTabIdx); }
-    else if (ev.key === "Delete") { void runVerb("delete"); }
-    else if (ev.key === "F2") { startRename(); }
-    else if (ev.key === "F5") { void refresh(); }
-    else if (ev.altKey && ev.key === "Enter") { showProperties(); }
-    else if (ev.key === "Enter") {
-      const sel = [...tab.selection];
-      if (sel.length === 1) {
-        const e = tab.listing?.entries.find((x) => x.parse_path === sel[0]);
-        if (e) void openEntry(e);
+    const key = ev.key.toLowerCase();
+
+    // Esc：关闭菜单 → 取消剪切态 → 清除首字母定位缓冲
+    if (ev.key === "Escape") {
+      typeBuf = "";
+      if (document.querySelector(".dropdown-wrap")) { closeDropdown(); return; }
+      if (cutPaths.size) { cutPaths = new Set(); renderList(); }
+      return;
+    }
+
+    // ---- Ctrl+Shift ----
+    if (ev.ctrlKey && ev.shiftKey && !ev.altKey) {
+      // Ctrl+Shift+1..8：切换 8 种视图（1=超大图标 … 8=内容）
+      const m = /^Digit([1-8])$/.exec(ev.code);
+      if (m) {
+        ev.preventDefault();
+        setView(VIEW_ORDER[VIEW_ORDER.length - Number(m[1])]);
+        return;
+      }
+      switch (key) {
+        case "c": ev.preventDefault(); copyAddresses(); return;   // 复制文件地址
+        case "n": ev.preventDefault(); void createNewFolder(); return; // 新建文件夹
+        case "w": ev.preventDefault(); void appWindow.close(); return; // 关闭窗口
+        case "e": ev.preventDefault(); void expandNavToCurrent(); return; // 展开导航窗格到当前文件夹
+        case "tab": ev.preventDefault(); switchTab(-1); return;   // 上一个标签页
       }
     }
-    else if (ev.key === "Backspace" || (ev.altKey && ev.key === "ArrowLeft")) { goBack(); }
-    else if (ev.altKey && ev.key === "ArrowRight") { goForward(); }
-    else if (ev.altKey && ev.key === "ArrowUp") { goUp(); }
+
+    // ---- Ctrl ----
+    if (ev.ctrlKey && !ev.shiftKey && !ev.altKey) {
+      // Ctrl+1..9：切换到第 N 个标签页（9 = 最后一个）
+      const m = /^Digit([1-9])$/.exec(ev.code);
+      if (m) {
+        ev.preventDefault();
+        const n = Number(m[1]);
+        const idx = n === 9 ? tabs.length - 1 : n - 1;
+        if (idx < tabs.length && idx !== activeTabIdx) { activeTabIdx = idx; renderAll(); }
+        return;
+      }
+      switch (key) {
+        case "a": ev.preventDefault(); selectAllItems(); return;
+        case "c": void runVerb("copy"); return;
+        case "x": void runVerb("cut"); return;
+        case "v": void runVerb("paste"); return;
+        case "z": void doUndo(); return;
+        case "y": void doRedo(); return;
+        case "d": void runVerb("delete"); return;                 // Ctrl+D 删除
+        case "r": ev.preventDefault(); void refresh(); return;
+        case "t": ev.preventDefault(); addTab(THIS_PC); return;
+        case "w": ev.preventDefault(); closeTab(activeTabIdx); return;
+        case "n":
+          ev.preventDefault();
+          void invoke("open_new_window", { path: tab.listing?.parse_path ?? THIS_PC });
+          return;
+        case "l": ev.preventDefault(); startAddressEdit(); return; // 选中地址栏
+        case "e":
+        case "f": ev.preventDefault(); ($("search-input") as HTMLInputElement).focus(); return; // 搜索框
+        case "tab": ev.preventDefault(); switchTab(1); return;
+        case " ": ev.preventDefault(); focusSelect(true); return;  // 切换焦点项选中
+      }
+    }
+
+    // ---- Alt ----
+    if (ev.altKey && !ev.ctrlKey) {
+      if (ev.key === "Enter") { ev.preventDefault(); showProperties(); return; }
+      if (ev.key === "ArrowLeft") { goBack(); return; }
+      if (ev.key === "ArrowRight") { goForward(); return; }
+      if (ev.key === "ArrowUp") { goUp(); return; }
+      if (ev.key === "Home") { void navigate(THIS_PC); return; }   // 主页
+      if (ev.key === "F4") { void appWindow.close(); return; }
+      if (!ev.shiftKey && key === "d") { ev.preventDefault(); startAddressEdit(); return; } // 选中地址栏
+      if (key === "p") {
+        // Alt+P 预览窗格 / Alt+Shift+P 详细信息窗格（与 Win11 一致）
+        ev.preventDefault();
+        if (ev.shiftKey) {
+          settings.detailsPane = !settings.detailsPane;
+          if (settings.detailsPane) settings.previewPane = false;
+        } else {
+          settings.previewPane = !settings.previewPane;
+          if (settings.previewPane) settings.detailsPane = false;
+        }
+        renderAll();
+        return;
+      }
+      return;
+    }
+
+    // ---- 功能键与编辑键 ----
+    switch (ev.key) {
+      case "F2": startRename(); return;
+      case "F3": ev.preventDefault(); ($("search-input") as HTMLInputElement).focus(); return;
+      case "F4": ev.preventDefault(); startAddressEdit(); return;
+      case "F5": void refresh(); return;
+      case "F10": if (ev.shiftKey) { ev.preventDefault(); showKeyboardContextMenu(); } return;
+      case "F11": ev.preventDefault(); toggleFullscreen(); return;
+      case "ContextMenu": ev.preventDefault(); showKeyboardContextMenu(); return;
+      case "Delete":
+        if (ev.shiftKey) deletePermanent();
+        else void runVerb("delete");
+        return;
+      case "Backspace": goBack(); return;
+      case "Enter": openSelection(ev.shiftKey); return;
+      case "ArrowUp": case "ArrowDown": case "ArrowLeft": case "ArrowRight":
+      case "Home": case "End": case "PageUp": case "PageDown":
+        ev.preventDefault();
+        moveFocusDir(ev.key, ev);
+        return;
+    }
+
+    // 空格：选中焦点项；其余可打印字符：首字母定位
+    if (ev.key === " " && !typeBuf) { ev.preventDefault(); focusSelect(false); return; }
+    if (ev.key.length === 1 && !ev.ctrlKey && !ev.metaKey) { ev.preventDefault(); typeAhead(ev.key); }
   });
+
+  // Ctrl+鼠标滚轮：缩放视图（沿资源管理器视图序列）
+  $("list-body").addEventListener("wheel", (ev) => {
+    if (!ev.ctrlKey) return;
+    ev.preventDefault();
+    zoomView(ev.deltaY < 0 ? 1 : -1);
+  }, { passive: false });
 
   // 分栏拖拽：侧栏（左）与详细信息窗格（右）；宽度持久化，重启/刷新后保持上次拖拽的宽度
   const setupResizer = (handle: HTMLElement, target: HTMLElement, min: number, max: number, invert: boolean, storeKey: string) => {

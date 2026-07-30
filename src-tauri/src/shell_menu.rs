@@ -457,6 +457,26 @@ pub fn new_folder(parent: &str, name: &str) -> Result<(), String> {
     }
 }
 
+/// 删除（IFileOperation）：permanent=false 进回收站；true 为 Shift+Delete 永久删除
+/// （不带 FOF_ALLOWUNDO，系统会弹出"永久删除"确认对话框）
+pub fn delete_items(paths: Vec<String>, permanent: bool) -> Result<(), String> {
+    use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
+    use windows::Win32::UI::Shell::{FileOperation, IFileOperation, FOF_ALLOWUNDO};
+    unsafe {
+        let op: IFileOperation =
+            CoCreateInstance(&FileOperation, None, CLSCTX_INPROC_SERVER).map_err(|e| e.message())?;
+        if !permanent {
+            op.SetOperationFlags(FOF_ALLOWUNDO).map_err(|e| e.message())?;
+        }
+        for p in &paths {
+            let item = item_from_path(p).map_err(|e| e.message())?;
+            op.DeleteItem(&item, None).map_err(|e| e.message())?;
+        }
+        op.PerformOperations().map_err(|e| e.message())?;
+        Ok(())
+    }
+}
+
 /// 压缩为 ZIP 文件：资源管理器同款 IExplorerCommand（Windows.CompressTo.Zip），
 /// 对选中项生成同目录 zip（与右键"压缩为 ZIP 文件"一致）
 pub fn compress_to_zip(selection: Vec<String>) -> bool {

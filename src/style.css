@@ -35,6 +35,11 @@ body {
 
 #app { display: flex; flex-direction: column; height: 100vh; }
 
+/* F11 全屏：隐藏标题栏/导航栏/命令栏，仅保留侧栏+列表+状态栏（与资源管理器一致） */
+body.fullscreen .titlebar,
+body.fullscreen .navbar,
+body.fullscreen .cmdbar { display: none; }
+
 /* ===== 标题栏 ===== */
 .titlebar {
   display: flex;
@@ -307,6 +312,8 @@ body {
 .row:hover { background: var(--bg-hover); }
 .row.selected { background: var(--bg-selected); }
 .row.cut { opacity: 0.55; }
+/* 键盘焦点项：细焦点框（与资源管理器焦点矩形一致，各视图通用） */
+.kb-focus { outline: 1px solid rgba(255, 255, 255, 0.45); outline-offset: -1px; }
 .cell { padding: 0 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cell-name { display: flex; align-items: center; gap: 10px; }
 .cell-name img { width: 18px; height: 18px; flex-shrink: 0; }
