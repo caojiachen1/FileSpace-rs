@@ -25,13 +25,19 @@ interface ShellEntry {
   drive_free: number | null;
   drive_text: string;
   pinned: boolean;
+  group_id: number;
+  group_name: string;
 }
 interface Crumb { name: string; parse_path: string; }
+interface SortDesc { key: string | null; ascending: boolean; fmtid: string; pid: number; }
+interface GroupDesc { key: string | null; ascending: boolean; fmtid: string; pid: number; }
 interface FolderListing {
   folder_name: string;
   parse_path: string;
   breadcrumb: Crumb[];
   entries: ShellEntry[];
+  sort: SortDesc;
+  group: GroupDesc | null;
 }
 interface SidebarData {
   quick_access: ShellEntry[];
@@ -86,6 +92,8 @@ interface Tab {
   sortAsc: boolean;
   filter: string;
   view: ViewMode;
+  groupKey: string | null;
+  collapsedGroups: Set<string>;
 }
 let tabSeq = 0;
 const tabs: Tab[] = [];
@@ -110,6 +118,8 @@ function newTab(path: string): Tab {
     sortAsc: true,
     filter: "",
     view: "details",
+    groupKey: null,
+    collapsedGroups: new Set(),
   };
 }
 const activeTab = () => tabs[activeTabIdx];
@@ -187,6 +197,7 @@ async function navigate(path: string, opts: { push?: boolean; selectPath?: strin
     // 命中缓存：立即渲染，后台继续拉最新数据
     pendingPath = null;
     tab.listing = cached;
+    syncSortGroup(tab, cached);
     tab.selection.clear();
     tab.anchorIndex = -1;
     tab.filter = "";
@@ -224,6 +235,7 @@ async function navigate(path: string, opts: { push?: boolean; selectPath?: strin
     pendingPath = null;
     cacheListing(path, listing);
     tab.listing = listing;
+    syncSortGroup(tab, listing);
     if (!cached) {
       tab.selection.clear();
       tab.anchorIndex = -1;
@@ -269,6 +281,7 @@ async function refresh() {
   try {
     const listing = await invoke<FolderListing>("list_folder", { path });
     tab.listing = listing;
+    syncSortGroup(tab, listing);
     cacheListing(path, listing);
     tab.selection = new Set(listing.entries.filter((e) => keep.has(e.parse_path)).map((e) => e.parse_path));
     renderAll();
@@ -309,8 +322,7 @@ function goUp() {
   }
 }
 
-/* ===================== 排序与过滤 ===================== */
-const collator = new Intl.Collator("zh-CN", { numeric: true, sensitivity: "base" });
+/* ===================== 过滤（排序由后端 ShellBag 定序，前端保序） ===================== */
 
 // 按"文件扩展名"开关计算显示名
 function displayName(e: ShellEntry): string {
@@ -320,6 +332,7 @@ function displayName(e: ShellEntry): string {
   return dot > 0 ? full.slice(0, dot) : full;
 }
 
+// 后端已按目录 ShellBag 排好序（含文件夹优先/分组序），前端仅做隐藏/搜索过滤并保序
 function sortedEntries(tab: Tab): ShellEntry[] {
   const l = tab.listing;
   if (!l) return [];
@@ -329,17 +342,37 @@ function sortedEntries(tab: Tab): ShellEntry[] {
     const f = tab.filter.toLowerCase();
     list = list.filter((e) => e.name.toLowerCase().includes(f));
   }
-  const dir = tab.sortAsc ? 1 : -1;
-  return [...list].sort((a, b) => {
-    if (a.sort_as_folder !== b.sort_as_folder) return a.sort_as_folder ? -1 : 1;
-    switch (tab.sortKey) {
-      case "date": return (a.date_modified - b.date_modified) * dir || collator.compare(a.name, b.name);
-      case "created": return (a.date_created - b.date_created) * dir || collator.compare(a.name, b.name);
-      case "type": return collator.compare(a.type_text, b.type_text) * dir || collator.compare(a.name, b.name);
-      case "size": return ((a.size ?? 0) - (b.size ?? 0)) * dir || collator.compare(a.name, b.name);
-      default: return collator.compare(a.name, b.name) * dir;
-    }
-  });
+  return list;
+}
+
+// 用后端返回的 ShellBag 排序/分组描述镜像到 Tab（列头箭头/菜单勾选依据）
+function syncSortGroup(tab: Tab, listing: FolderListing) {
+  if (listing.sort?.key) tab.sortKey = listing.sort.key as SortKey;
+  if (listing.sort) tab.sortAsc = listing.sort.ascending;
+  tab.groupKey = listing.group?.key ?? null;
+}
+
+// 更改排序列/方向：写回 ShellBag 后 refresh() 拉取已排序数据（覆盖缓存）
+async function applySort(key: SortKey, forceAsc?: boolean) {
+  const tab = activeTab();
+  const path = tab.listing?.parse_path ?? tab.history[tab.historyIndex];
+  // 显式方向优先；同列点击翻转；换列默认升序
+  const ascending = forceAsc !== undefined
+    ? forceAsc
+    : tab.sortKey === key ? !tab.sortAsc : true;
+  await invoke("set_sort", { path, key, ascending });
+  listingCache.delete(path);
+  await refresh();
+}
+
+// 更改分组依据（key 为 null 表示不分组）：写回 ShellBag 后 refresh()
+async function applyGroup(key: string | null) {
+  const tab = activeTab();
+  const path = tab.listing?.parse_path ?? tab.history[tab.historyIndex];
+  tab.collapsedGroups.clear();
+  await invoke("set_group", { path, key });
+  listingCache.delete(path);
+  await refresh();
 }
 
 /* ===================== 渲染 ===================== */
@@ -357,7 +390,7 @@ function setupMarquee() {
   body.addEventListener("mousedown", (ev) => {
     if (ev.button !== 0) return;
     const t = ev.target as HTMLElement;
-    if (t.closest(ITEM_SELECTOR) || t.closest(".pc-group-header")) return;
+    if (t.closest(ITEM_SELECTOR) || t.closest(".pc-group-header") || t.closest(".group-header")) return;
     const tab = activeTab();
     const bodyRect = () => body.getBoundingClientRect();
     const r0 = bodyRect();
@@ -1007,10 +1040,7 @@ function renderHeader() {
       el.append(g);
     }
     el.onclick = () => {
-      if (tab.sortKey === col.key) tab.sortAsc = !tab.sortAsc;
-      else { tab.sortKey = col.key; tab.sortAsc = true; }
-      renderHeader();
-      renderList();
+      void applySort(col.key as SortKey);
     };
     // 列分割线拖拽调宽
     const handle = document.createElement("span");
@@ -1055,14 +1085,10 @@ function renderList() {
     renderThisPc(body, tab, entries);
   } else if (isLinux) {
     renderCardGrid(body, tab, entries);
+  } else if (tab.groupKey && entries.some((e) => e.group_id >= 0)) {
+    renderGrouped(body, tab, entries);
   } else {
-    switch (tab.view) {
-      case "details": renderDetailRows(body, tab, entries); break;
-      case "tiles": renderTiles(body, tab, entries); break;
-      case "content": renderContent(body, tab, entries); break;
-      case "list": renderListView(body, tab, entries); break;
-      default: renderIconGrid(body, tab, entries); break;
-    }
+    renderByView(body, tab, entries, 0);
   }
 
   if (entries.length === 0) {
@@ -1088,6 +1114,7 @@ function renderList() {
     const t = ev.target as HTMLElement;
     if (t.closest(ITEM_SELECTOR)) return;
     if (t.closest(".pc-group-header")) return; // 折叠分组不清选中
+    if (t.closest(".group-header")) return; // 分组标题不清选中
     if (tab.selection.size === 0) return;
     tab.selection.clear();
     tab.anchorIndex = -1;
@@ -1251,8 +1278,54 @@ function requestIcons(tab: Tab, entries: ShellEntry[]) {
   }
 }
 
+/* -------- 分组渲染（后端按 group_id 定序，前端插入组标题行） -------- */
+function renderByView(body: HTMLElement, tab: Tab, entries: ShellEntry[], base: number) {
+  switch (tab.view) {
+    case "details": renderDetailRows(body, tab, entries, base); break;
+    case "tiles": renderTiles(body, tab, entries, base); break;
+    case "content": renderContent(body, tab, entries, base); break;
+    case "list": renderListView(body, tab, entries, base); break;
+    default: renderIconGrid(body, tab, entries, base); break;
+  }
+}
+
+function makeGroupHeader(tab: Tab, name: string, count: number, collapsed: boolean): HTMLElement {
+  const h = document.createElement("div");
+  h.className = "group-header" + (collapsed ? " collapsed" : "");
+  const chevron = document.createElement("span");
+  chevron.className = "fluent group-chevron";
+  chevron.innerHTML = collapsed ? "&#xE76C;" : "&#xE70D;"; // 右/下
+  const label = document.createElement("span");
+  label.className = "group-title";
+  label.textContent = `${name} (${count})`;
+  h.append(chevron, label);
+  h.onclick = (ev) => {
+    ev.stopPropagation();
+    if (collapsed) tab.collapsedGroups.delete(name);
+    else tab.collapsedGroups.add(name);
+    renderList();
+  };
+  return h;
+}
+
+function renderGrouped(body: HTMLElement, tab: Tab, entries: ShellEntry[]) {
+  let i = 0;
+  while (i < entries.length) {
+    const gid = entries[i].group_id;
+    let j = i;
+    while (j < entries.length && entries[j].group_id === gid) j++;
+    const run = entries.slice(i, j);
+    const name = run[0].group_name || "其他";
+    const collapsed = tab.collapsedGroups.has(name);
+    body.append(makeGroupHeader(tab, name, run.length, collapsed));
+    if (!collapsed) renderByView(body, tab, run, i);
+    i = j;
+  }
+  requestIcons(tab, entries);
+}
+
 /* -------- 详细信息 -------- */
-function renderDetailRows(body: HTMLElement, tab: Tab, entries: ShellEntry[]) {
+function renderDetailRows(body: HTMLElement, tab: Tab, entries: ShellEntry[], base = 0) {
   // 名称列为固定宽时，行宽收缩为各列总宽（不延伸到屏幕最右，与表头一致）
   const fitWidth = colWidths.name !== 0;
   entries.forEach((e, idx) => {
@@ -1282,14 +1355,14 @@ function renderDetailRows(body: HTMLElement, tab: Tab, entries: ShellEntry[]) {
       row.append(cell);
     }
 
-    bindItemEvents(row, e, idx, tab);
+    bindItemEvents(row, e, idx + base, tab);
     body.append(row);
   });
   requestIcons(tab, entries);
 }
 
 /* -------- 图标网格（小/中/大/超大） -------- */
-function renderIconGrid(body: HTMLElement, tab: Tab, entries: ShellEntry[]) {
+function renderIconGrid(body: HTMLElement, tab: Tab, entries: ShellEntry[], base = 0) {
   const cfg = VIEW_CFG[tab.view];
   const grid = document.createElement("div");
   grid.className = `icon-grid ig-${tab.view}`;
@@ -1303,7 +1376,7 @@ function renderIconGrid(body: HTMLElement, tab: Tab, entries: ShellEntry[]) {
     nm.textContent = displayName(e);
     nm.title = e.name;
     cell.append(img, nm);
-    bindItemEvents(cell, e, idx, tab);
+    bindItemEvents(cell, e, idx + base, tab);
     grid.append(cell);
   });
   body.append(grid);
@@ -1311,7 +1384,7 @@ function renderIconGrid(body: HTMLElement, tab: Tab, entries: ShellEntry[]) {
 }
 
 /* -------- 列表（多列流式） -------- */
-function renderListView(body: HTMLElement, tab: Tab, entries: ShellEntry[]) {
+function renderListView(body: HTMLElement, tab: Tab, entries: ShellEntry[], base = 0) {
   const cols = document.createElement("div");
   cols.className = "list-columns";
   entries.forEach((e, idx) => {
@@ -1324,7 +1397,7 @@ function renderListView(body: HTMLElement, tab: Tab, entries: ShellEntry[]) {
     nm.textContent = displayName(e);
     nm.title = e.name;
     item.append(img, nm);
-    bindItemEvents(item, e, idx, tab);
+    bindItemEvents(item, e, idx + base, tab);
     cols.append(item);
   });
   body.append(cols);
@@ -1332,7 +1405,7 @@ function renderListView(body: HTMLElement, tab: Tab, entries: ShellEntry[]) {
 }
 
 /* -------- 平铺 -------- */
-function renderTiles(body: HTMLElement, tab: Tab, entries: ShellEntry[]) {
+function renderTiles(body: HTMLElement, tab: Tab, entries: ShellEntry[], base = 0) {
   const grid = document.createElement("div");
   grid.className = "tile-grid";
   entries.forEach((e, idx) => {
@@ -1355,7 +1428,7 @@ function renderTiles(body: HTMLElement, tab: Tab, entries: ShellEntry[]) {
     meta.append(nm, l2);
     if (e.size_text) meta.append(l3);
     cell.append(img, meta);
-    bindItemEvents(cell, e, idx, tab);
+    bindItemEvents(cell, e, idx + base, tab);
     grid.append(cell);
   });
   body.append(grid);
@@ -1363,7 +1436,7 @@ function renderTiles(body: HTMLElement, tab: Tab, entries: ShellEntry[]) {
 }
 
 /* -------- 内容 -------- */
-function renderContent(body: HTMLElement, tab: Tab, entries: ShellEntry[]) {
+function renderContent(body: HTMLElement, tab: Tab, entries: ShellEntry[], base = 0) {
   entries.forEach((e, idx) => {
     const row = document.createElement("div");
     row.className = "content-row";
@@ -1382,7 +1455,7 @@ function renderContent(body: HTMLElement, tab: Tab, entries: ShellEntry[]) {
     date.className = "content-date";
     date.textContent = e.date_text ? `修改日期: ${e.date_text}` : "";
     row.append(img, mid, date);
-    bindItemEvents(row, e, idx, tab);
+    bindItemEvents(row, e, idx + base, tab);
     body.append(row);
   });
   requestIcons(tab, entries);
@@ -1983,7 +2056,12 @@ function showSortMenu(anchor: HTMLElement) {
   const keyItem = (key: Tab["sortKey"], label: string): MenuItem => ({
     label,
     checked: tab.sortKey === key,
-    onClick: () => { tab.sortKey = key; renderHeader(); renderList(); },
+    onClick: () => { void applySort(key); },
+  });
+  const groupItem = (key: string | null, label: string): MenuItem => ({
+    label,
+    checked: tab.groupKey === key,
+    onClick: () => { void applyGroup(key); },
   });
   showDropdown(anchor, [
     keyItem("name", "名称"),
@@ -1991,8 +2069,15 @@ function showSortMenu(anchor: HTMLElement) {
     keyItem("type", "类型"),
     keyItem("size", "大小"),
     { separator: true },
-    { label: "递增", checked: tab.sortAsc, onClick: () => { tab.sortAsc = true; renderHeader(); renderList(); } },
-    { label: "递减", checked: !tab.sortAsc, onClick: () => { tab.sortAsc = false; renderHeader(); renderList(); } },
+    { label: "递增", checked: tab.sortAsc, onClick: () => { void applySort(tab.sortKey, true); } },
+    { label: "递减", checked: !tab.sortAsc, onClick: () => { void applySort(tab.sortKey, false); } },
+    { separator: true },
+    { label: "分组依据", disabled: true },
+    groupItem(null, "(无)"),
+    groupItem("name", "名称"),
+    groupItem("date", "修改日期"),
+    groupItem("type", "类型"),
+    groupItem("size", "大小"),
   ]);
 }
 
@@ -2918,7 +3003,7 @@ async function showBackgroundMenu(x: number, y: number) {
   // 排序方式子菜单：与命令栏"排序"菜单一致
   const sortItem = (key: SortKey, label: string): MenuItem => ({
     label, checked: tab.sortKey === key, checkStyle: "dot",
-    onClick: () => { tab.sortKey = key; renderHeader(); renderList(); },
+    onClick: () => { void applySort(key); },
   });
   const sortSub: MenuItem[] = [
     sortItem("name", "名称"),
@@ -2926,8 +3011,21 @@ async function showBackgroundMenu(x: number, y: number) {
     sortItem("type", "类型"),
     sortItem("size", "大小"),
     { separator: true },
-    { label: "递增", checked: tab.sortAsc, checkStyle: "dot", onClick: () => { tab.sortAsc = true; renderHeader(); renderList(); } },
-    { label: "递减", checked: !tab.sortAsc, checkStyle: "dot", onClick: () => { tab.sortAsc = false; renderHeader(); renderList(); } },
+    { label: "递增", checked: tab.sortAsc, checkStyle: "dot", onClick: () => { void applySort(tab.sortKey, true); } },
+    { label: "递减", checked: !tab.sortAsc, checkStyle: "dot", onClick: () => { void applySort(tab.sortKey, false); } },
+  ];
+
+  // 分组依据子菜单
+  const groupItem = (key: string | null, label: string): MenuItem => ({
+    label, checked: tab.groupKey === key, checkStyle: "dot",
+    onClick: () => { void applyGroup(key); },
+  });
+  const groupSub: MenuItem[] = [
+    groupItem(null, "(无)"),
+    groupItem("name", "名称"),
+    groupItem("date", "修改日期"),
+    groupItem("type", "类型"),
+    groupItem("size", "大小"),
   ];
 
   // 新建子菜单：ShellNew 模板（与命令栏"新建"菜单同源）；虚拟位置回退仅"文件夹"
@@ -2962,6 +3060,7 @@ async function showBackgroundMenu(x: number, y: number) {
   const moreSub: MenuItem[] = [
     { label: "查看", submenu: viewSub },
     { label: "排序方式", submenu: sortSub },
+    { label: "分组依据", submenu: groupSub },
     { label: "刷新", onClick: () => void refresh() },
     { separator: true },
     ...tree.map(nodeToItem),
@@ -2970,6 +3069,7 @@ async function showBackgroundMenu(x: number, y: number) {
   const items: MenuItem[] = [
     { label: "查看", glyph: "&#xE890;", submenu: viewSub },
     { label: "排序方式", glyph: "&#xE8CB;", submenu: sortSub },
+    { label: "分组依据", glyph: "&#xE902;", submenu: groupSub },
     { label: "刷新", glyph: "&#xE72C;", onClick: () => void refresh() },
     { separator: true },
   ];
@@ -3003,11 +3103,11 @@ function handleMenuResult(r: MenuResult, sel: string[]) {
   } else if (r.action === "set-view") {
     setView(r.verb as ViewMode);
   } else if (r.action === "set-sort") {
-    tab.sortKey = r.verb as Tab["sortKey"];
-    renderHeader(); renderList();
+    void applySort(r.verb as SortKey);
   } else if (r.action === "set-sort-dir") {
-    tab.sortAsc = r.verb === "asc";
-    renderHeader(); renderList();
+    void applySort(tab.sortKey, r.verb === "asc");
+  } else if (r.action === "set-group") {
+    void applyGroup(r.verb ? r.verb : null);
   } else if (r.action === "refresh") {
     void refresh();
   } else if (r.action === "invoked") {

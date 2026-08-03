@@ -4,6 +4,7 @@
 mod commands;
 mod drag_drop;
 mod shell_bags;
+mod shell_group;
 mod shell_icons;
 mod shell_items;
 mod shell_menu;
@@ -51,6 +52,8 @@ fn main() {
             commands::invoke_modern_item,
             commands::get_view_mode,
             commands::set_view_mode,
+            commands::set_sort,
+            commands::set_group,
             commands::get_image_size,
             commands::get_item_details,
             commands::init_drag_drop,

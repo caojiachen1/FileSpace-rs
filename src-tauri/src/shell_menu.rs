@@ -38,6 +38,8 @@ pub struct ViewState {
     pub view: String,     // "details" | "icons"
     pub sort_key: String, // "name" | "date" | "type" | "size"
     pub sort_asc: bool,
+    #[serde(default)]
+    pub group_key: Option<String>, // 分组依据 key，None/空 表示不分组
 }
 
 struct PidlGuard(Vec<*mut ITEMIDLIST>);
@@ -111,6 +113,11 @@ const ID_SORT_SIZE: u32 = 0x9013;
 const ID_SORT_ASC: u32 = 0x9014;
 const ID_SORT_DESC: u32 = 0x9015;
 const ID_REFRESH: u32 = 0x9020;
+const ID_GROUP_NONE: u32 = 0x9030;
+const ID_GROUP_NAME: u32 = 0x9031;
+const ID_GROUP_DATE: u32 = 0x9032;
+const ID_GROUP_TYPE: u32 = 0x9033;
+const ID_GROUP_SIZE: u32 = 0x9034;
 
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -161,11 +168,33 @@ unsafe fn inject_view_items(hmenu: HMENU, state: &ViewState) {
     let checked_dir = if state.sort_asc { ID_SORT_ASC } else { ID_SORT_DESC };
     let _ = CheckMenuRadioItem(sort_menu, ID_SORT_ASC, ID_SORT_DESC, checked_dir, MF_BYCOMMAND.0);
 
+    let group_menu = CreatePopupMenu().unwrap_or_default();
+    for (id, label) in [
+        (ID_GROUP_NONE, "(无)"),
+        (ID_GROUP_NAME, "名称(N)"),
+        (ID_GROUP_DATE, "修改日期(M)"),
+        (ID_GROUP_TYPE, "类型(T)"),
+        (ID_GROUP_SIZE, "大小(S)"),
+    ] {
+        let w = wide(label);
+        let _ = AppendMenuW(group_menu, MF_STRING, id as usize, PCWSTR(w.as_ptr()));
+    }
+    let checked_group = match state.group_key.as_deref() {
+        Some("name") => ID_GROUP_NAME,
+        Some("date") => ID_GROUP_DATE,
+        Some("type") => ID_GROUP_TYPE,
+        Some("size") => ID_GROUP_SIZE,
+        _ => ID_GROUP_NONE,
+    };
+    let _ = CheckMenuRadioItem(group_menu, ID_GROUP_NONE, ID_GROUP_SIZE, checked_group, MF_BYCOMMAND.0);
+
     let w_view = wide("查看(V)");
     let w_sort = wide("排序方式(O)");
+    let w_group = wide("分组依据(P)");
     let w_refresh = wide("刷新(E)");
     let _ = AppendMenuW(hmenu, MF_POPUP, view_menu.0 as usize, PCWSTR(w_view.as_ptr()));
     let _ = AppendMenuW(hmenu, MF_POPUP, sort_menu.0 as usize, PCWSTR(w_sort.as_ptr()));
+    let _ = AppendMenuW(hmenu, MF_POPUP, group_menu.0 as usize, PCWSTR(w_group.as_ptr()));
     let _ = AppendMenuW(hmenu, MF_STRING, ID_REFRESH as usize, PCWSTR(w_refresh.as_ptr()));
     let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0, PCWSTR::null());
 }
@@ -183,6 +212,11 @@ fn custom_result(cmd: u32) -> Option<MenuResult> {
         ID_SORT_SIZE => ("set-sort", "size"),
         ID_SORT_ASC => ("set-sort-dir", "asc"),
         ID_SORT_DESC => ("set-sort-dir", "desc"),
+        ID_GROUP_NONE => ("set-group", ""),
+        ID_GROUP_NAME => ("set-group", "name"),
+        ID_GROUP_DATE => ("set-group", "date"),
+        ID_GROUP_TYPE => ("set-group", "type"),
+        ID_GROUP_SIZE => ("set-group", "size"),
         ID_REFRESH => ("refresh", ""),
         _ => return None,
     };
@@ -219,6 +253,7 @@ pub fn show_menu(selection: Vec<String>, background: Option<String>, state: Opti
                 view: "details".into(),
                 sort_key: "name".into(),
                 sort_asc: true,
+                group_key: None,
             });
             inject_view_items(hmenu, &st);
         }

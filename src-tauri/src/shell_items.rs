@@ -2,15 +2,20 @@
 use serde::Serialize;
 use windows::core::{Interface, GUID, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{FILETIME, PROPERTYKEY};
+use windows::Win32::System::Com::StructuredStorage::{
+    InitPropVariantFromFileTime, PropVariantClear, PropVariantCompareEx, PROPVARIANT,
+    PVCF_DEFAULT, PVCF_TREATEMPTYASGREATERTHAN, PVCU_DEFAULT,
+};
 use windows::Win32::System::Com::{CoTaskMemFree, IBindCtx};
 use windows::Win32::System::SystemServices::{
     SFGAO_FILESYSTEM, SFGAO_FOLDER, SFGAO_HIDDEN, SFGAO_STREAM,
 };
 use windows::Win32::UI::Shell::Common::ITEMIDLIST;
+use windows::Win32::UI::Shell::PropertiesSystem::{IPropertyStore, GPS_FASTPROPERTIESONLY};
 use windows::Win32::UI::Shell::{
     IEnumShellItems, IShellItem, IShellItem2, SHCreateItemFromParsingName, SHFormatDateTimeW,
-    StrFormatKBSizeW, BHID_EnumItems, SIGDN_DESKTOPABSOLUTEPARSING, SIGDN_FILESYSPATH,
-    SIGDN_NORMALDISPLAY,
+    StrCmpLogicalW, StrFormatKBSizeW, BHID_EnumItems, SIGDN_DESKTOPABSOLUTEPARSING,
+    SIGDN_FILESYSPATH, SIGDN_NORMALDISPLAY,
 };
 
 // This PC / 快速访问 / 网络 / Linux(WSL) 的解析名
@@ -29,6 +34,83 @@ const PKEY_DATE_CREATED: PROPERTYKEY = PROPERTYKEY { fmtid: FMTID_STORAGE, pid: 
 const FMTID_IMAGE: GUID = GUID::from_u128(0x6444048F_4C8B_11D1_8B70_080036B11A03);
 const PKEY_IMAGE_H: PROPERTYKEY = PROPERTYKEY { fmtid: FMTID_IMAGE, pid: 3 };
 const PKEY_IMAGE_V: PROPERTYKEY = PROPERTYKEY { fmtid: FMTID_IMAGE, pid: 4 };
+// System.ItemNameDisplay（名称列，与资源管理器"名称"排序一致）
+const PKEY_NAME_DISPLAY: PROPERTYKEY = PROPERTYKEY { fmtid: FMTID_STORAGE, pid: 10 };
+// System.ItemDate（媒体拍摄日期，空时资源管理器回退修改日期）
+const FMTID_ITEM_DATE: GUID = GUID::from_u128(0xF7DB74B4_4287_4103_AFBA_F1B13DCD75CF);
+
+/// ShellBag 中解析出的单个排序列
+#[derive(Clone, Copy)]
+pub struct SortColumn {
+    pub fmtid: GUID,
+    pub pid: u32,
+    pub ascending: bool,
+}
+
+impl SortColumn {
+    pub fn pkey(&self) -> PROPERTYKEY {
+        PROPERTYKEY { fmtid: self.fmtid, pid: self.pid }
+    }
+}
+
+/// ShellBag 中的分组列（None 表示不分组）
+#[derive(Clone, Copy)]
+pub struct GroupCols {
+    pub fmtid: GUID,
+    pub pid: u32,
+    pub ascending: bool,
+}
+
+impl GroupCols {
+    pub fn pkey(&self) -> PROPERTYKEY {
+        PROPERTYKEY { fmtid: self.fmtid, pid: self.pid }
+    }
+}
+
+/// 传给前端的当前排序描述（key 为前端可识别列名，无法映射时 None）
+#[derive(Serialize)]
+pub struct SortDesc {
+    pub key: Option<String>,
+    pub ascending: bool,
+    pub fmtid: String,
+    pub pid: u32,
+}
+
+/// 传给前端的当前分组描述
+#[derive(Serialize)]
+pub struct GroupDesc {
+    pub key: Option<String>,
+    pub ascending: bool,
+    pub fmtid: String,
+    pub pid: u32,
+}
+
+/// 属性列 -> 前端 SortKey（"name"|"date"|"created"|"type"|"size"），无法映射返回 None
+pub fn column_to_frontend_key(fmtid: &GUID, pid: u32) -> Option<&'static str> {
+    if *fmtid != FMTID_STORAGE {
+        return None;
+    }
+    match pid {
+        10 => Some("name"),
+        14 => Some("date"),
+        15 => Some("created"),
+        4 => Some("type"),
+        12 => Some("size"),
+        _ => None,
+    }
+}
+
+/// 前端 SortKey -> 属性列 PROPERTYKEY
+pub fn frontend_key_to_pkey(key: &str) -> Option<PROPERTYKEY> {
+    Some(match key {
+        "name" => PKEY_NAME_DISPLAY,
+        "date" => PKEY_DATE_MODIFIED,
+        "created" => PKEY_DATE_CREATED,
+        "type" => PKEY_ITEM_TYPE_TEXT,
+        "size" => PKEY_SIZE,
+        _ => return None,
+    })
+}
 
 #[derive(Serialize, Clone, Default)]
 pub struct ShellEntry {
@@ -53,6 +135,10 @@ pub struct ShellEntry {
     pub drive_text: String,
     /// 仅快速访问：用户置顶（true）或最近访问的常用文件夹（false）
     pub pinned: bool,
+    /// 分组序号（同组相同，未分组为 -1；用于前端插入分组标题行）
+    pub group_id: i32,
+    /// 本地化分组名（如"今天""很大""A"；未分组为空）
+    pub group_name: String,
 }
 
 #[derive(Serialize)]
@@ -67,6 +153,8 @@ pub struct FolderListing {
     pub parse_path: String,
     pub breadcrumb: Vec<Crumb>,
     pub entries: Vec<ShellEntry>,
+    pub sort: SortDesc,
+    pub group: Option<GroupDesc>,
 }
 
 #[derive(Serialize)]
@@ -135,6 +223,11 @@ fn filetime_to_unix_ms(ft: &FILETIME) -> i64 {
     let t = ((ft.dwHighDateTime as u64) << 32) | ft.dwLowDateTime as u64;
     // FILETIME: 100ns since 1601-01-01
     ((t / 10_000) as i64) - 11_644_473_600_000
+}
+
+fn unix_ms_to_filetime(ms: i64) -> FILETIME {
+    let t = ((ms + 11_644_473_600_000).max(0) as u64) * 10_000;
+    FILETIME { dwLowDateTime: t as u32, dwHighDateTime: (t >> 32) as u32 }
 }
 
 /// 资源管理器风格字节数（"38.8 GB"）
@@ -255,6 +348,8 @@ pub fn entry_from_item(item: &IShellItem2) -> Option<ShellEntry> {
             drive_free,
             drive_text,
             pinned: false,
+            group_id: -1,
+            group_name: String::new(),
         })
     }
 }
@@ -265,6 +360,11 @@ pub fn enumerate_folder(path: &str) -> Result<Vec<ShellEntry>, String> {
 }
 
 fn enumerate_item(item: &IShellItem2) -> Result<Vec<ShellEntry>, String> {
+    Ok(enumerate_pairs(item)?.into_iter().map(|(e, _)| e).collect())
+}
+
+/// 枚举文件夹并保留每项的 IShellItem2 句柄（供按属性排序/分组读取 PROPVARIANT）
+fn enumerate_pairs(item: &IShellItem2) -> Result<Vec<(ShellEntry, IShellItem2)>, String> {
     let mut out = Vec::new();
     unsafe {
         let enumerator: IEnumShellItems = item
@@ -284,7 +384,7 @@ fn enumerate_item(item: &IShellItem2) -> Result<Vec<ShellEntry>, String> {
                 };
                 // 隐藏项也返回，由前端"隐藏的项目"开关决定是否显示
                 if let Some(entry) = entry_from_item(&item2) {
-                    out.push(entry);
+                    out.push((entry, item2));
                 }
             }
         }
@@ -340,17 +440,193 @@ pub fn breadcrumb_for(path: &str) -> Vec<Crumb> {
     chain
 }
 
+/// 用 PropVariantCompareEx 做与资源管理器一致的属性比较（自然序、空值排后）
+fn compare_propvariants(a: &PROPVARIANT, b: &PROPVARIANT) -> i32 {
+    unsafe { PropVariantCompareEx(a, b, PVCU_DEFAULT, PVCF_DEFAULT | PVCF_TREATEMPTYASGREATERTHAN) }
+}
+
+/// 按 ShellBag 排序列（+可选分组）对枚举结果排序，输出带分组标签的 ShellEntry。
+/// 文件夹永远在前（分组时在各自组内在前），排序列平局按名称自然序（StrCmpLogicalW）。
+pub fn sort_and_group(
+    pairs: Vec<(ShellEntry, IShellItem2)>,
+    sort: &[SortColumn],
+    group: Option<GroupCols>,
+    folder: &IShellItem2,
+) -> Vec<ShellEntry> {
+    use std::cmp::Ordering;
+    let n = pairs.len();
+
+    // 分组：算出每项 (rank, name)
+    let mut group_rank: Vec<i32> = vec![-1; n];
+    let mut group_name: Vec<String> = vec![String::new(); n];
+    if let Some(gc) = group {
+        let items: Vec<IShellItem2> = pairs.iter().map(|(_, it)| it.clone()).collect();
+        if let Some(res) = crate::shell_group::compute(folder, &items, gc) {
+            for (i, (rank, name)) in res.into_iter().enumerate() {
+                group_rank[i] = rank;
+                group_name[i] = name;
+            }
+        }
+    }
+    let grouping_active = group.is_some() && group_rank.iter().any(|r| *r >= 0);
+
+    // 解析每个排序列的前端键（决定用哪种与资源管理器一致的比较方式）
+    let keys: Vec<Option<&'static str>> =
+        sort.iter().map(|c| column_to_frontend_key(&c.fmtid, c.pid)).collect();
+
+    // 预编码字符串列（名称/类型）为宽字符，供 StrCmpLogicalW 自然序比较
+    let names: Vec<Vec<u16>> = pairs.iter().map(|(e, _)| to_wide(&e.name)).collect();
+    let types: Vec<Vec<u16>> = pairs.iter().map(|(e, _)| to_wide(&e.type_text)).collect();
+
+    // 仅对无法映射到 ShellEntry 字段的列预取 PROPVARIANT（回退比较）。
+    // 必须用 GPS_FASTPROPERTIESONLY 的属性存储：IShellItem2::GetProperty 会打开文件读
+    // 元数据（每项数毫秒），大目录切换会卡顿；快速存储只取文件系统即得的值。
+    let need_pv = keys.iter().any(|k| k.is_none());
+    let mut props: Vec<Vec<PROPVARIANT>> = Vec::new();
+    if need_pv {
+        props.reserve(n);
+        for (entry, it) in &pairs {
+            let store: Option<IPropertyStore> =
+                unsafe { it.GetPropertyStore(GPS_FASTPROPERTIESONLY) }.ok();
+            let mut row = Vec::with_capacity(sort.len());
+            for (k, col) in sort.iter().enumerate() {
+                let mut pv = PROPVARIANT::default();
+                if keys[k].is_none() {
+                    if let Some(s) = &store {
+                        pv = unsafe { s.GetValue(&col.pkey()) }.unwrap_or_default();
+                    }
+                    // System.ItemDate 快速值常为空（需打开文件取拍摄日期），
+                    // 资源管理器语义：无媒体日期时回退修改日期
+                    if pv.is_empty() && col.fmtid == FMTID_ITEM_DATE && col.pid == 100 {
+                        let ft = unix_ms_to_filetime(entry.date_modified);
+                        pv = unsafe { InitPropVariantFromFileTime(&ft) }.unwrap_or_default();
+                    }
+                }
+                row.push(pv);
+            }
+            props.push(row);
+        }
+    }
+
+    let logical = |a: &[u16], b: &[u16]| -> i32 {
+        unsafe { StrCmpLogicalW(PCWSTR(a.as_ptr()), PCWSTR(b.as_ptr())) }
+    };
+    let cmp_i = |o: Ordering| -> i32 {
+        match o {
+            Ordering::Less => -1,
+            Ordering::Equal => 0,
+            Ordering::Greater => 1,
+        }
+    };
+
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|&ia, &ib| {
+        // 分组优先
+        if grouping_active {
+            match group_rank[ia].cmp(&group_rank[ib]) {
+                Ordering::Equal => {}
+                o => return o,
+            }
+        }
+        // 文件夹永远在前
+        let fa = pairs[ia].0.sort_as_folder;
+        let fb = pairs[ib].0.sort_as_folder;
+        if fa != fb {
+            return if fa { Ordering::Less } else { Ordering::Greater };
+        }
+        // 按排序列依次比较（与资源管理器一致：字符串自然序，数值/日期数值比较）
+        for (k, col) in sort.iter().enumerate() {
+            let ea = &pairs[ia].0;
+            let eb = &pairs[ib].0;
+            let c = match keys[k] {
+                Some("name") => logical(&names[ia], &names[ib]),
+                Some("type") => logical(&types[ia], &types[ib]),
+                Some("size") => cmp_i(ea.size.unwrap_or(0).cmp(&eb.size.unwrap_or(0))),
+                Some("date") => cmp_i(ea.date_modified.cmp(&eb.date_modified)),
+                Some("created") => cmp_i(ea.date_created.cmp(&eb.date_created)),
+                _ => compare_propvariants(&props[ia][k], &props[ib][k]),
+            };
+            if c != 0 {
+                let dir = if col.ascending { 1 } else { -1 };
+                return (c * dir).cmp(&0);
+            }
+        }
+        // 平局：名称自然序
+        logical(&names[ia], &names[ib]).cmp(&0)
+    });
+
+    // 释放 PROPVARIANT
+    for row in props.iter_mut() {
+        for pv in row.iter_mut() {
+            unsafe {
+                let _ = PropVariantClear(pv);
+            }
+        }
+    }
+
+    // 按序输出，填充连续 group_id
+    let mut result = Vec::with_capacity(n);
+    let mut last_rank = i32::MIN;
+    let mut gid = -1i32;
+    for &i in &order {
+        let mut entry = pairs[i].0.clone();
+        if grouping_active {
+            if group_rank[i] != last_rank {
+                last_rank = group_rank[i];
+                gid += 1;
+            }
+            entry.group_id = gid;
+            entry.group_name = group_name[i].clone();
+        }
+        result.push(entry);
+    }
+    result
+}
+
+fn sort_desc_from(cols: &[SortColumn]) -> SortDesc {
+    match cols.first() {
+        Some(c) => SortDesc {
+            key: column_to_frontend_key(&c.fmtid, c.pid).map(|s| s.to_string()),
+            ascending: c.ascending,
+            fmtid: format!("{:?}", c.fmtid),
+            pid: c.pid,
+        },
+        None => SortDesc {
+            key: Some("name".to_string()),
+            ascending: true,
+            fmtid: String::new(),
+            pid: 0,
+        },
+    }
+}
+
+fn group_desc_from(g: &GroupCols) -> GroupDesc {
+    GroupDesc {
+        key: column_to_frontend_key(&g.fmtid, g.pid).map(|s| s.to_string()),
+        ascending: g.ascending,
+        fmtid: format!("{:?}", g.fmtid),
+        pid: g.pid,
+    }
+}
+
 pub fn folder_listing(path: &str) -> Result<FolderListing, String> {
     let item = item_from_path(path).map_err(|e| e.message())?;
     let folder_name = display_name(&item, SIGDN_NORMALDISPLAY).unwrap_or_default();
-    let parse_path = display_name(&item, SIGDN_DESKTOPABSOLUTEPARSING).unwrap_or_else(|| path.to_string());
-    let entries = enumerate_folder(path)?;
+    let parse_path =
+        display_name(&item, SIGDN_DESKTOPABSOLUTEPARSING).unwrap_or_else(|| path.to_string());
+    let (sort_cols, group_col) = crate::shell_bags::effective_sort_group(path);
+    let pairs = enumerate_pairs(&item)?;
+    let entries = sort_and_group(pairs, &sort_cols, group_col, &item);
     let breadcrumb = breadcrumb_for(path);
+    let sort = sort_desc_from(&sort_cols);
+    let group = group_col.as_ref().map(group_desc_from);
     Ok(FolderListing {
         folder_name,
         parse_path,
         breadcrumb,
         entries,
+        sort,
+        group,
     })
 }
 

@@ -211,6 +211,18 @@ pub async fn set_view_mode(path: String, view: String) -> bool {
     run_on_shell(move || crate::shell_bags::save_view_mode(&path, &view))
 }
 
+/// 将排序列/方向写回 ShellBag（资源管理器下次打开同样生效）
+#[tauri::command]
+pub async fn set_sort(path: String, key: String, ascending: bool) -> bool {
+    run_on_shell(move || crate::shell_bags::save_sort(&path, &key, ascending))
+}
+
+/// 将分组依据写回 ShellBag（key 为 None 表示不分组）
+#[tauri::command]
+pub async fn set_group(path: String, key: Option<String>) -> bool {
+    run_on_shell(move || crate::shell_bags::save_group(&path, key))
+}
+
 /// 图片分辨率（详细信息窗格用）
 #[tauri::command]
 pub async fn get_image_size(path: String) -> Option<(u32, u32)> {
