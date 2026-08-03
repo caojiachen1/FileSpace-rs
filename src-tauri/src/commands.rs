@@ -235,6 +235,50 @@ pub async fn get_item_details(path: String) -> Vec<(String, String)> {
     run_on_shell(move || shell_items::item_details(&path))
 }
 
+/// 在当前目录启动命令（地址栏命令输入，与资源管理器一致：
+/// 输入 cmd 即在该目录打开命令窗口；输入其他命令名则按 PATH 查找执行）
+#[tauri::command]
+pub async fn run_in_folder(dir: String, command: String) -> bool {
+    let t = command.trim();
+    if t.is_empty() {
+        return false;
+    }
+    // 先验证命令存在：绝对路径（盘符/UNC）直接检查文件，其余用 where 在 PATH 中查找。
+    // cmd /C start 即使命令无效也能成功启动 cmd 自身，无法据此判断命令是否存在。
+    let is_path = t.len() >= 2
+        && (t.as_bytes().get(1) == Some(&b':') || t.starts_with("\\\\"));
+    let found = if is_path {
+        std::path::Path::new(t).exists()
+    } else {
+        let name = t.split_whitespace().next().unwrap_or(t);
+        std::process::Command::new("where")
+            .arg(name)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    };
+    if !found {
+        return false;
+    }
+    // 用 cmd /c start 启动：独立窗口、不阻塞、继承指定工作目录；
+    // 首参空串作为窗口标题占位；仅对不含参数的带空格完整路径加引号，
+    // "程序 参数…" 形式原样交给 start（整体加引号会把参数也包进去导致找不到程序）
+    let quoted = if t.starts_with('"') {
+        t.to_string()
+    } else if t.contains(' ') && (t.starts_with("\\\\") || t.as_bytes().get(1) == Some(&b':')) {
+        format!("\"{}\"", t)
+    } else {
+        t.to_string()
+    };
+    std::process::Command::new("cmd")
+        .args(["/C", "start", "", &quoted])
+        .current_dir(&dir)
+        .spawn()
+        .is_ok()
+}
+
 // ---- 原生拖拽：以下命令刻意不走 run_on_shell ----
 // DoDragDrop 模态循环在主线程运行，拖拽期间 shell 线程需保持空闲响应其他命令；
 // update_drop_target 在拖拽中高频调用，走 run_on_shell 会排队甚至死锁。

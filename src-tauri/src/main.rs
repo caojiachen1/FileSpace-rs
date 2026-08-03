@@ -56,6 +56,7 @@ fn main() {
             commands::set_group,
             commands::get_image_size,
             commands::get_item_details,
+            commands::run_in_folder,
             commands::init_drag_drop,
             commands::init_snap_layout,
             commands::set_max_button_rect,

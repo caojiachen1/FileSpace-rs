@@ -2423,10 +2423,24 @@ function startAddressEdit() {
       finish();
       if (v) {
         void navigate(v).then((ok) => {
-          if (!ok) {
-            // 与资源管理器一致：路径无效时给出提示
-            alert(`Windows 找不到"${v}"。请检查拼写并重试。`);
+          if (ok) return;
+          // 不是有效路径：按资源管理器逻辑作为命令执行（如输入 cmd 就在当前目录打开命令窗口）
+          const cur = activeTab().listing;
+          let dir = cur?.parse_path ?? "";
+          // 虚拟位置（此电脑/网络/快速访问等）没有文件系统路径：
+          // 默认从 C:\Windows\System32 打开命令（与资源管理器一致）
+          if (!/^[a-zA-Z]:[\\/]|^\\\\/.test(dir)) {
+            dir = "C:\\Windows\\System32";
           }
+          void invoke<boolean>("run_in_folder", { dir, command: v })
+            .then((ran) => {
+              if (!ran) {
+                alert(`Windows 找不到"${v}"。请检查拼写并重试。`);
+              }
+            })
+            .catch(() => {
+              alert(`Windows 找不到"${v}"。请检查拼写并重试。`);
+            });
         });
       }
     }
